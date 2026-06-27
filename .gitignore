@@ -1,0 +1,16 @@
+.env
+.garth_tokens/
+*.log
+public/
+.claude/
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
+data/
