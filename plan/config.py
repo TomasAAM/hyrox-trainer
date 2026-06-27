@@ -115,19 +115,21 @@ ATHLETE_LOADS: dict[str, str] = {
 
 
 # Current target: Hyrox on 2026-08-02 (the Doubles race she runs with her brother).
-# 3 Hyrox-specific sessions/week (1 gym-strength + 2 functional/station/sim); she
-# runs on her own plan, so every other weekday is a run/recovery day (read from
-# Garmin's scheduled workouts), hence no fixed rest day here.
+# Daily, undulated Hyrox program (~6 substantive sessions + an active-recovery day).
+# Her interval RUN days are Monday and Wednesday (per her own report — this overrides
+# the Garmin calendar, which disagreed), so running_source is "fixed": on those days
+# the Hyrox work is upper-body/technique to spare her running legs, and the hard
+# Hyrox sessions land on the other days.
 DEFAULT_CONFIG = PlanConfig(
     target_race="hyrox",
     race_date=date(2026, 8, 2),
     division=HYROX_DIVISION,
-    sessions_per_week=3,
-    strength_per_week=1,
+    sessions_per_week=6,
+    strength_per_week=2,
     rest_days=(),
     model="claude-code",
     recent_window_days=28,
     gym_access="full",
-    running_source="garmin_scheduled",
-    running_days=(),
+    running_source="fixed",
+    running_days=("Monday", "Wednesday"),
 )
