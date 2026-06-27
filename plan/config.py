@@ -107,25 +107,24 @@ HYROX_STANDARDS: dict[str, str] = {
 }
 # Known athlete capacities (update as she reports a movement feeling too light or
 # heavy). Barbell lifts are prescribed by RPE until working weights are provided.
-# TODO(confirm with her): replace placeholders with her real capacities.
 ATHLETE_LOADS: dict[str, str] = {
-    "wall_balls": "6 kg, unbroken count TBC",
-    "sandbag_lunges": "20 kg, feel TBC",
+    "wall_balls": "7 kg, comfortable (heavier than the 6 kg Women's Pro standard)",
+    "sandbag_lunges": "20 kg, comfortable (matches Women's Pro standard)",
+    "sled": "comfortable at Doubles load; building toward Women's Pro (push 152 kg / pull 103 kg)",
 }
 
 
-# Current target: edit RACE_DATE to her actual race. 3 Hyrox-specific sessions/
-# week (1 gym-strength + 2 functional/station/sim); she runs on her own plan, so
-# the other weekdays default to no Hyrox session. Her run days are read from
-# Garmin's scheduled workouts.
-# TODO(confirm with her): race_date and sessions_per_week.
+# Current target: Hyrox on 2026-08-02 (the Doubles race she runs with her brother).
+# 3 Hyrox-specific sessions/week (1 gym-strength + 2 functional/station/sim); she
+# runs on her own plan, so every other weekday is a run/recovery day (read from
+# Garmin's scheduled workouts), hence no fixed rest day here.
 DEFAULT_CONFIG = PlanConfig(
     target_race="hyrox",
-    race_date=date(2026, 11, 1),  # PLACEHOLDER — set her real race date.
+    race_date=date(2026, 8, 2),
     division=HYROX_DIVISION,
     sessions_per_week=3,
     strength_per_week=1,
-    rest_days=("Sunday",),
+    rest_days=(),
     model="claude-code",
     recent_window_days=28,
     gym_access="full",
