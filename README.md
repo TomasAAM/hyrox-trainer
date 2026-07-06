@@ -70,9 +70,10 @@ python -m dashboard.build   # render public/index.html
 
 ## GitHub Actions
 
-The workflow runs every Sunday 09:00 UTC (and on manual dispatch): ingests Garmin
+The workflow runs daily at 09:00 UTC (and on manual dispatch): ingests Garmin
 data, refreshes HR zones (best-effort), builds the dashboard, and deploys to
-Pages.
+Pages. Running daily also keeps the Supabase project from being paused for
+inactivity.
 
 Required secrets: `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`.

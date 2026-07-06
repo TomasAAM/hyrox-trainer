@@ -1,8 +1,8 @@
-name: Weekly Ingestion & Dashboard
+name: Daily Ingestion & Dashboard
 
 on:
   schedule:
-    - cron: '0 9 * * 0'  # Every Sunday at 9am UTC
+    - cron: '0 9 * * *'  # Every day at 9am UTC (also keeps Supabase from pausing on inactivity)
   workflow_dispatch:      # Allow manual trigger
 
 # Allow the deploy job to publish to GitHub Pages.

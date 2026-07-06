@@ -128,8 +128,8 @@ def upcoming_monday(today: date) -> date:
     """Return the Monday of the week to plan for.
 
     If ``today`` is already a Monday, that day is returned; otherwise the next
-    Monday is returned. Run on the Sunday cron this yields the week about to
-    start; run mid-week (manual) it yields next week.
+    Monday is returned. Run on a Sunday this yields the week about to start; run
+    mid-week it yields next week.
 
     Parameters
     ----------
