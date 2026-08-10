@@ -41,13 +41,17 @@ cp .env.example .env           # fill in the four values below
 
 `.env` keys:
 
-- `GARMIN_EMAIL`, `GARMIN_PASSWORD` — her Garmin Connect login.
+- `GARMIN_EMAIL`, `GARMIN_PASSWORD` — her Garmin Connect login. Only needed for
+  the initial login; afterwards runs resume from a stored token.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — her own Supabase project.
+- `GARMIN_TOKENS` — optional, serialized Garmin token JSON. An escape hatch for
+  environments that cannot reach the Supabase token store.
 
 ### 2. Database
 
 Apply the migrations in `migrations/` to her Supabase project (SQL editor or
-CLI), in order: `0001_initial_schema.sql`, then `0002_training_plan.sql`.
+CLI), in order: `0001_initial_schema.sql`, `0002_training_plan.sql`, then
+`0003_garmin_auth.sql`.
 
 ### 3. Configure the plan
 
@@ -60,6 +64,7 @@ Edit `plan/config.py` → `DEFAULT_CONFIG`:
 ### 4. Run the pipeline
 
 ```bash
+python -m ingest.bootstrap_token  # once: seed the Garmin token store (see below)
 python -m ingest.run        # backfill ~90 days of Garmin data
 python -m plan.zones        # seed HR zones from Garmin (max-HR estimate fallback)
 python -m plan.context      # print the generation brief (read her scheduled runs)
@@ -78,9 +83,42 @@ inactivity.
 Required secrets: `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`.
 
-> Note: CI performs a fresh Garmin SSO login. If her account has MFA enabled,
-> seed a token locally first (`.garth_tokens/`) or disable MFA for automation —
-> otherwise run ingestion locally.
+### Garmin authentication in CI
+
+Garmin answers SSO password logins from datacentre IP ranges with a Cloudflare
+bot challenge (HTTP 403), so a GitHub runner can never log in from scratch — it
+can only resume from a token issued elsewhere. Authentication therefore resolves
+in this order:
+
+1. the `garmin_auth` row in Supabase (the only route that works in CI),
+2. a `GARMIN_TOKENS` env var holding serialized token JSON,
+3. local `.garth_tokens/`, then `~/.garminconnect` (the Garmin MCP server's
+   default location),
+4. a full SSO login — residential connections only.
+
+Seed the store once from a machine that can log in:
+
+```bash
+python -m ingest.bootstrap_token
+```
+
+Garmin rotates the refresh token, so every successful run writes the new one
+back to `garmin_auth`. Re-run the bootstrap only if the stored token is ever
+rejected — the ingestion job will say so explicitly.
+
+> The `garmin_auth.tokens` value is a live credential for the Garmin account.
+> The table has RLS enabled with no policies, so only the service-role key can
+> read it. Never expose it through a client-side key.
+
+### Failure behaviour
+
+Ingestion failures propagate and fail the job, and the run additionally asserts
+that the newest wellness row is at most two days old. Both exist because the
+opposite behaviour hid a nineteen-day outage: the login was failing, the error
+was logged and swallowed, the job exited 0, and the dashboard kept serving stale
+data that read as *excellent* form (TSB +54.9 against an actual −26.8). If the
+data does go stale anyway, the dashboard renders a warning banner above the
+metrics rather than presenting them as current.
 
 ## Tests
 
@@ -101,3 +139,4 @@ pytest
 | `training_zones` | Five heart-rate zones (from Garmin) |
 | `training_plan_weeks` | One audited row per generated week |
 | `planned_sessions` | Daily Hyrox prescriptions |
+| `garmin_auth` | Rotating Garmin OAuth token (service-role only) |
