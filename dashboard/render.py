@@ -278,6 +278,49 @@ def build_figure(load_series: pd.DataFrame, hrv_series: pd.DataFrame) -> go.Figu
     return fig
 
 
+# Days the newest data may lag before the dashboard warns it cannot be trusted.
+# Mirrors ingest.run.MAX_DATA_AGE_DAYS: Garmin can lag a day, more means broken.
+STALE_AFTER_DAYS = 2
+
+
+def _stale_banner(as_of: date, today: date | None = None) -> str:
+    """Render a warning banner when the underlying data has stopped updating.
+
+    Every metric on the page is derived from the newest data in the database, so
+    a stalled pipeline does not look like an error — it looks like an athlete
+    who stopped training, and reads as misleadingly *good* form. This makes the
+    staleness impossible to miss instead of leaving it implicit in the date.
+
+    Parameters
+    ----------
+    as_of : datetime.date
+        Date of the newest data point behind the snapshot.
+    today : datetime.date, optional
+        Reference date; defaults to the current date.
+
+    Returns
+    -------
+    str
+        An HTML fragment, or an empty string when the data is fresh.
+
+    Examples
+    --------
+    >>> _stale_banner(date(2026, 8, 9), today=date(2026, 8, 10))
+    ''
+    >>> _stale_banner(date(2026, 7, 20), today=date(2026, 8, 9)).startswith('<div')
+    True
+    """
+    age = ((today or date.today()) - as_of).days
+    if age <= STALE_AFTER_DAYS:
+        return ""
+    return (
+        f'<div class="stale"><strong>Data is {age} days old.</strong> The newest '
+        f"reading is from {as_of:%d %B %Y}, so form, ACWR and load below are stale "
+        "and will read as falsely fresh. Ingestion has most likely stopped — check "
+        "the daily workflow and re-seed the Garmin token if needed.</div>"
+    )
+
+
 def _snapshot_cards(snapshot: ReadinessSnapshot) -> str:
     """Render the header cards (CTL/ATL/TSB/HRV) as an HTML fragment."""
     hrv_text = (
@@ -531,6 +574,7 @@ def render_html(
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     as_of = snapshot.date.strftime("%A, %d %B %Y")
     plan_html = _plan_section(plan) if plan is not None else ""
+    stale_html = _stale_banner(snapshot.date.date())
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -639,12 +683,16 @@ def render_html(
   table.zones th:first-child, table.zones td:first-child {{ text-align: left; }}
   table.zones th {{ color: #64748b; font-weight: 600; }}
   .note {{ color: #475569; font-size: 0.88rem; line-height: 1.5; }}
+  .stale {{ background: #fef2f2; border: 1px solid #fecaca; border-left: 4px solid #dc2626;
+            color: #7f1d1d; padding: 12px 14px; border-radius: 8px; margin: 12px 0 4px;
+            font-size: 0.9rem; line-height: 1.5; }}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Hyrox Training</h1>
   <div class="as-of">As of {as_of}</div>
+  {stale_html}
 
   <div class="tabs">
     <button class="tab-btn active" data-tab="training">Training load</button>
