@@ -31,6 +31,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Authentication resumes from the rotating token in the garmin_auth table
+      # (seeded by `python -m ingest.bootstrap_token`), because Garmin answers
+      # SSO password logins from GitHub's IP ranges with a Cloudflare 403.
+      # GARMIN_EMAIL / GARMIN_PASSWORD remain only as a fallback that works if
+      # the run ever happens from an unblocked address.
+      # This step must be allowed to fail the job: a silent failure here is what
+      # let the dashboard serve three-week-old data behind a green check.
       - name: Run ingestion
         env:
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}

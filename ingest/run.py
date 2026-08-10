@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LOOKBACK_DAYS = 90
 
+# Garmin sometimes lags a day in publishing wellness data, so one day of slack
+# is normal; beyond this the pipeline is considered broken rather than quiet.
+MAX_DATA_AGE_DAYS = 2
+
 
 def get_supabase_client():
     """Create an authenticated Supabase client from environment variables.
@@ -74,8 +78,64 @@ def get_last_synced_date(supabase) -> date:
     return since
 
 
+def assert_data_is_fresh(supabase, max_age_days: int = MAX_DATA_AGE_DAYS) -> date:
+    """Verify the newest synced wellness date is recent enough to trust.
+
+    A successful-looking run that ingested nothing is the failure mode that hid
+    a nineteen-day outage: every downstream metric is computed from whatever is
+    in the database, so stale data reads as an athlete who stopped training
+    rather than as a broken pipeline. This turns that silence into a hard error.
+
+    Parameters
+    ----------
+    supabase : supabase.Client
+        Authenticated Supabase client.
+    max_age_days : int
+        Maximum tolerated lag between today and the newest wellness row.
+
+    Returns
+    -------
+    date
+        The newest wellness date present after ingestion.
+
+    Raises
+    ------
+    RuntimeError
+        If no wellness rows exist or the newest one is older than ``max_age_days``.
+    """
+    result = (
+        supabase.table("garmin_daily_wellness")
+        .select("date")
+        .order("date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise RuntimeError("Ingestion produced no wellness rows at all")
+
+    newest = date.fromisoformat(result.data[0]["date"])
+    age = (date.today() - newest).days
+    if age > max_age_days:
+        raise RuntimeError(
+            f"Ingested data is stale: newest wellness date is {newest} ({age} days old, "
+            f"limit {max_age_days}). Garmin authentication most likely failed — check the "
+            "stored token and re-seed it with `python -m ingest.bootstrap_token`."
+        )
+
+    logger.info("Data freshness OK: newest wellness date is %s (%d days old)", newest, age)
+    return newest
+
+
 def main() -> None:
-    """Run the full Garmin ingestion pipeline."""
+    """Run the full Garmin ingestion pipeline.
+
+    Raises
+    ------
+    Exception
+        Any ingestion failure is re-raised so the process exits non-zero. The
+        scheduled workflow must go red when this breaks — swallowing the error
+        here is what let the dashboard silently serve three-week-old data.
+    """
     logger.info("Starting ingestion pipeline")
 
     supabase = get_supabase_client()
@@ -84,13 +144,16 @@ def main() -> None:
     logger.info("Running Garmin ingestion from %s", since)
     try:
         # Authenticate once and reuse the client for both wellness and activity
-        # ingestion to avoid a second SSO login.
-        garmin_client = garmin.get_client()
+        # ingestion to avoid a second login. Passing the Supabase client lets
+        # get_client resume from the stored token and rotate it afterwards.
+        garmin_client = garmin.get_client(supabase)
         garmin.ingest(supabase, since=since, client=garmin_client)
         garmin_activities.ingest(supabase, garmin_client, since=since)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Garmin ingestion failed: %s", exc, exc_info=True)
+    except Exception:
+        logger.error("Garmin ingestion failed", exc_info=True)
+        raise
 
+    assert_data_is_fresh(supabase)
     logger.info("Ingestion pipeline complete")
 
 
