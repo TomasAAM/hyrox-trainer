@@ -140,13 +140,13 @@ def _recent_summary(
     }
 
 
-def _scheduled_runs(cfg: PlanConfig, week_start: date) -> list[dict[str, Any]]:
+def _scheduled_runs(cfg: PlanConfig, week_start: date, supabase=None) -> list[dict[str, Any]]:
     """Read her scheduled runs for the plan week from Garmin (best-effort)."""
     if cfg.running_source != "garmin_scheduled":
         return []
     week_end = week_start + timedelta(days=6)
     try:
-        client = ingest_garmin.get_client()
+        client = ingest_garmin.get_client(supabase)
         return ingest_garmin.get_scheduled_runs(client, week_start, week_end)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not read scheduled runs from Garmin: %s", exc)
@@ -183,7 +183,7 @@ def gather(cfg: PlanConfig = DEFAULT_CONFIG) -> ContextBundle:
     load_band = phase.load_target_band(snapshot.ctl * 7.0, phase_name)
     summary = _recent_summary(activities, load_series, snapshot, readiness, cfg.recent_window_days)
 
-    runs = _scheduled_runs(cfg, week_start)
+    runs = _scheduled_runs(cfg, week_start, supabase)
     if runs:
         running_days = sorted(
             {date.fromisoformat(r["date"]).strftime("%A") for r in runs},

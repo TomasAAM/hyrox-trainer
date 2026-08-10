@@ -129,7 +129,9 @@ def _floors_from_max_hr(max_hr: int) -> list[int]:
 
 
 def build_rows(
-    client: Any | None = None, max_hr_override: int | None = None
+    client: Any | None = None,
+    max_hr_override: int | None = None,
+    supabase: Client | None = None,
 ) -> list[dict[str, Any]]:
     """Compute zone rows, preferring Garmin's configured zones.
 
@@ -141,6 +143,10 @@ def build_rows(
         entirely (useful for offline testing).
     max_hr_override : int, optional
         Force the max-HR estimate path with this max HR (skips Garmin calls).
+    supabase : supabase.Client, optional
+        Passed through to :func:`ingest.garmin.get_client` so authentication can
+        resume from the stored token. Without it there is no way to log in from
+        CI, where Garmin's SSO endpoint is Cloudflare-blocked.
 
     Returns
     -------
@@ -153,7 +159,7 @@ def build_rows(
         logger.info("Building zones from max-HR override (%d bpm)", max_hr_override)
         return _zone_rows(_floors_from_max_hr(max_hr_override), "max_hr_estimate", source_date)
 
-    client = client or garmin.get_client()
+    client = client or garmin.get_client(supabase)
     payload = garmin.get_hr_zones(client)
 
     floors = _floors_from_garmin(payload)
@@ -187,7 +193,7 @@ def seed(
     """
     supabase = supabase or _get_client()
     if rows is None:
-        rows = build_rows()
+        rows = build_rows(supabase=supabase)
     supabase.table("training_zones").upsert(rows, on_conflict="zone_index").execute()
     logger.info("Seeded %d HR zones (source: %s)", len(rows), rows[0]["source"])
     return len(rows)

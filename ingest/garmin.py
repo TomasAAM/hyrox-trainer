@@ -50,52 +50,175 @@ def _to_iso_ts(value: Any) -> str | None:
 # and prevents hitting Garmin's SSO rate limit.
 _TOKEN_DIR = Path(__file__).parent.parent / ".garth_tokens"
 
+# Table holding the single rotating DI token row (see migration 0003).
+_AUTH_TABLE = "garmin_auth"
 
-def get_client() -> Garmin:
-    """Authenticate with Garmin Connect, using a cached token when available.
+# garminconnect treats a tokenstore argument longer than this as token DATA
+# rather than a filesystem path, so a serialized token must clear it to be
+# loaded via `client.loads()` instead of being resolved as a path.
+_TOKEN_DATA_MIN_LEN = 512
 
-    Token lookup order:
-    1. ``.garth_tokens/`` in the project root (written by this script after
-       a successful login).
-    2. ``~/.garminconnect`` — the default location used by the Garmin MCP
-       server, so a shared desktop session can bootstrap the pipeline without
-       a fresh SSO login.
-    3. Full SSO login using GARMIN_EMAIL / GARMIN_PASSWORD (writes a new
-       token to ``.garth_tokens/`` for future runs).
+
+class GarminAuthError(RuntimeError):
+    """Raised when no Garmin authentication route succeeds."""
+
+
+def _read_stored_tokens(supabase: Client | None) -> str | None:
+    """Read the serialized DI token from Supabase, if one is stored."""
+    if supabase is None:
+        return None
+    try:
+        result = supabase.table(_AUTH_TABLE).select("tokens").eq("id", 1).limit(1).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read stored Garmin token: %s", exc)
+        return None
+    if not result.data:
+        return None
+    return result.data[0].get("tokens")
+
+
+def save_tokens(supabase: Client, client: Garmin) -> None:
+    """Persist a client's current DI token back to Supabase.
+
+    Garmin rotates the refresh token whenever the session is refreshed, so the
+    stored copy must be rewritten after every successful authentication —
+    otherwise the next scheduled run resumes from a superseded token and falls
+    back to the SSO login that Cloudflare blocks.
+
+    Parameters
+    ----------
+    supabase : supabase.Client
+        Authenticated Supabase client (service role).
+    client : Garmin
+        Authenticated Garmin client whose token should be stored.
+    """
+    try:
+        tokens = client.client.dumps()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not serialize Garmin token for storage: %s", exc)
+        return
+    try:
+        supabase.table(_AUTH_TABLE).upsert(
+            {"id": 1, "tokens": tokens, "updated_at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="id",
+        ).execute()
+        logger.info("Stored refreshed Garmin token in Supabase")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not store refreshed Garmin token: %s", exc)
+
+
+def get_client(supabase: Client | None = None) -> Garmin:
+    """Authenticate with Garmin Connect, preferring a stored token over SSO.
+
+    Garmin serves a Cloudflare bot challenge (HTTP 403) to password logins from
+    datacentre IPs, so a scheduled CI run can never complete an SSO login. It
+    can, however, resume from a previously issued DI token and refresh it
+    through an ordinary API call. The Supabase-backed store is therefore tried
+    first and is the only route that works unattended.
+
+    Resolution order:
+
+    1. The ``garmin_auth`` row in Supabase (works in CI; rotated on every run).
+    2. ``GARMIN_TOKENS`` env var holding serialized token JSON (bootstrap
+       escape hatch).
+    3. ``.garth_tokens/`` in the project root, then ``~/.garminconnect`` — the
+       Garmin MCP server's default location, so a desktop session can seed the
+       pipeline locally.
+    4. Full SSO login with GARMIN_EMAIL / GARMIN_PASSWORD. Works from a
+       residential IP only.
+
+    Whenever ``supabase`` is supplied, the resulting token is written back so
+    the next run inherits a fresh one.
+
+    Parameters
+    ----------
+    supabase : supabase.Client, optional
+        Service-role Supabase client used to read and rewrite the stored token.
+        When omitted, only the local and SSO routes are available.
 
     Returns
     -------
     Garmin
         Authenticated Garmin client.
+
+    Raises
+    ------
+    GarminAuthError
+        If every authentication route fails.
     """
-    email = os.environ["GARMIN_EMAIL"]
-    password = os.environ["GARMIN_PASSWORD"]
+    email = os.environ.get("GARMIN_EMAIL")
+    password = os.environ.get("GARMIN_PASSWORD")
+    failures: list[str] = []
 
-    # Directories to probe for cached tokens, in priority order.
-    _MCP_TOKEN_DIR = Path.home() / ".garminconnect"
-    token_candidates = [_TOKEN_DIR, _MCP_TOKEN_DIR]
+    # Serialized-token sources, tried before anything that touches SSO.
+    token_blobs: list[tuple[str, str]] = []
+    stored = _read_stored_tokens(supabase)
+    if stored:
+        token_blobs.append(("supabase", stored))
+    env_tokens = os.environ.get("GARMIN_TOKENS")
+    if env_tokens:
+        token_blobs.append(("GARMIN_TOKENS env var", env_tokens))
 
-    for token_dir in token_candidates:
-        if token_dir.exists():
-            try:
-                client = Garmin(email=email, password=password)
-                client.login(str(token_dir))
-                logger.info("Authenticated with Garmin Connect (token from %s)", token_dir)
-                # Mirror to project-local cache so the MCP dir isn't a hard dependency.
-                if token_dir != _TOKEN_DIR:
-                    _TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-                    client.client.dump(str(_TOKEN_DIR))
-                    logger.info("Token mirrored to %s", _TOKEN_DIR)
-                return client
-            except Exception:  # noqa: BLE001
-                logger.info("Token at %s invalid or expired — trying next source", token_dir)
+    for source, blob in token_blobs:
+        blob = blob.strip()
+        if len(blob) < _TOKEN_DATA_MIN_LEN:
+            # Below this length garminconnect would treat the blob as a path.
+            failures.append(f"{source}: token too short to be loaded as data")
+            continue
+        try:
+            client = Garmin(email=email, password=password)
+            client.login(blob)
+            logger.info("Authenticated with Garmin Connect (token from %s)", source)
+            if supabase is not None:
+                save_tokens(supabase, client)
+            return client
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Token from %s rejected (%s) — trying next source", source, exc)
+            failures.append(f"{source}: {exc}")
+
+    # Local token directories — how a developer machine stays logged in.
+    for token_dir in (_TOKEN_DIR, Path.home() / ".garminconnect"):
+        if not token_dir.exists():
+            continue
+        try:
+            client = Garmin(email=email, password=password)
+            client.login(str(token_dir))
+            logger.info("Authenticated with Garmin Connect (token from %s)", token_dir)
+            _TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+            client.client.dump(str(_TOKEN_DIR))
+            if supabase is not None:
+                save_tokens(supabase, client)
+            return client
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Token at %s invalid or expired (%s) — trying next source", token_dir, exc)
+            failures.append(f"{token_dir}: {exc}")
+
+    if not email or not password:
+        raise GarminAuthError(
+            "No usable Garmin token and no GARMIN_EMAIL / GARMIN_PASSWORD to fall back on. "
+            "Seed the token store by running `python -m ingest.bootstrap_token` on a machine "
+            "that can reach Garmin's login (a residential connection, not CI). "
+            f"Attempts: {'; '.join(failures) or 'none'}"
+        )
 
     logger.info("No valid cached token found — performing full SSO login")
-    client = Garmin(email=email, password=password)
-    client.login()
+    try:
+        client = Garmin(email=email, password=password)
+        client.login()
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"SSO login: {exc}")
+        raise GarminAuthError(
+            "Every Garmin authentication route failed. From a datacentre IP (e.g. GitHub "
+            "Actions) SSO is blocked by Cloudflare — seed the token store by running "
+            "`python -m ingest.bootstrap_token` on a machine that can log in. "
+            f"Attempts: {'; '.join(failures)}"
+        ) from exc
+
     _TOKEN_DIR.mkdir(parents=True, exist_ok=True)
     client.client.dump(str(_TOKEN_DIR))
     logger.info("Authenticated with Garmin Connect (full login, token saved to %s)", _TOKEN_DIR)
+    if supabase is not None:
+        save_tokens(supabase, client)
     return client
 
 
