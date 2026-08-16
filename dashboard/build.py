@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import pandas as pd
 from dotenv import load_dotenv
 
 from dashboard import metrics, query, render, zones
+from plan.config import DEFAULT_CONFIG
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
@@ -27,11 +27,12 @@ _OUTPUT_PATH = _PROJECT_ROOT / "public" / "index.html"
 
 
 def _build_plan_view(supabase, activities, zones_df) -> render.PlanView:
-    """Assemble the training-plan view model from the latest generated week.
+    """Assemble the training-plan view model for every week of the current race.
 
-    Reads the most recent plan week and its sessions (scored for adherence
-    against actual activities). Degrades gracefully to an empty view when no plan
-    has been generated yet.
+    Reads all generated weeks targeting the configured race date and their
+    sessions (scored for adherence against actual activities), so the dashboard
+    can switch between them. Weeks belonging to a previous race are left out.
+    Degrades gracefully to an empty view when no plan has been generated yet.
 
     Parameters
     ----------
@@ -47,15 +48,27 @@ def _build_plan_view(supabase, activities, zones_df) -> render.PlanView:
     render.PlanView
         View model consumed by :func:`dashboard.render.render_html`.
     """
-    week = query.fetch_latest_plan_week(supabase)
-    if week is None:
-        # No plan generated yet — skip the sessions query (an empty week_start is
-        # an invalid date for PostgREST) and render the empty-plan placeholder.
-        return render.PlanView(week=None, sessions=pd.DataFrame(), zones=zones_df)
+    race_date = DEFAULT_CONFIG.race_date.isoformat()
+    weeks = [w for w in query.fetch_plan_weeks(supabase) if w.get("race_date") == race_date]
+    if not weeks:
+        # No plan for this race yet — skip the sessions query (an empty week_start
+        # is an invalid date for PostgREST) and render the empty-plan placeholder.
+        return render.PlanView(weeks=[], sessions_by_week={}, zones=zones_df)
 
-    sessions = query.fetch_planned_sessions(supabase, week["week_start"])
-    sessions = metrics.compute_adherence(sessions, activities)
-    return render.PlanView(week=week, sessions=sessions, zones=zones_df)
+    week_starts = [w["week_start"] for w in weeks]
+    sessions_by_week = {
+        week_start: metrics.compute_adherence(sessions, activities)
+        for week_start, sessions in query.fetch_planned_sessions_multi(
+            supabase, week_starts
+        ).items()
+    }
+    logger.info("Plan: %d week(s) for race %s", len(weeks), race_date)
+    return render.PlanView(
+        weeks=weeks,
+        sessions_by_week=sessions_by_week,
+        zones=zones_df,
+        selected_week=render.default_selected_week(weeks),
+    )
 
 
 def main() -> None:

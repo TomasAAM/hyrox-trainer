@@ -105,19 +105,69 @@ def _methodology_sources_html() -> str:
 class PlanView:
     """View model for the training-plan section.
 
+    Holds every generated week for the current race so the dashboard can switch
+    between them, rather than only the most recent one.
+
     Parameters
     ----------
-    week : dict or None
-        Latest ``training_plan_weeks`` row, or ``None`` when no plan exists yet.
-    sessions : pandas.DataFrame
-        Planned sessions for that week, with a ``status`` column.
+    weeks : list of dict
+        ``training_plan_weeks`` rows, oldest first. Empty when no plan exists yet.
+    sessions_by_week : dict
+        Maps each week's ISO ``week_start`` to its sessions, with a ``status``
+        column.
     zones : pandas.DataFrame
         Heart-rate training zones.
+    selected_week : str or None
+        ISO ``week_start`` shown on load; defaults to the week containing today,
+        falling back to the last week before today, then the first week.
     """
 
-    week: dict | None
-    sessions: pd.DataFrame
+    weeks: list[dict]
+    sessions_by_week: dict[str, pd.DataFrame]
     zones: pd.DataFrame
+    selected_week: str | None = None
+
+    @property
+    def week(self) -> dict | None:
+        """The selected week's header row, or ``None`` when no plan exists."""
+        if not self.weeks:
+            return None
+        for week in self.weeks:
+            if week["week_start"] == self.selected_week:
+                return week
+        return self.weeks[0]
+
+
+def default_selected_week(weeks: list[dict], today: date | None = None) -> str | None:
+    """Pick the week the plan tab should open on.
+
+    Prefers the week containing ``today``; if today sits outside every planned
+    week, falls back to the most recent past week, then to the first week.
+
+    Parameters
+    ----------
+    weeks : list of dict
+        Plan-week rows ordered by ``week_start``.
+    today : datetime.date, optional
+        Reference date; defaults to today.
+
+    Returns
+    -------
+    str or None
+        ISO ``week_start`` to select, or ``None`` when there are no weeks.
+    """
+    if not weeks:
+        return None
+
+    reference = today or date.today()
+    past: str | None = None
+    for week in weeks:
+        start = date.fromisoformat(week["week_start"])
+        if start <= reference <= start + timedelta(days=6):
+            return week["week_start"]
+        if start < reference:
+            past = week["week_start"]
+    return past or weeks[0]["week_start"]
 
 
 def build_figure(load_series: pd.DataFrame, hrv_series: pd.DataFrame) -> go.Figure:
@@ -363,10 +413,15 @@ def _weekly_table(weekly: pd.DataFrame) -> str:
     return f"<table class='weekly'>{header}{body}</table>"
 
 
-def _phase_strip(race_date: date, current_week_start: date) -> str:
-    """Render a colored week-by-week periodization strip up to the race."""
+def _phase_strip(race_date: date, current_week_start: date, start_week: date | None = None) -> str:
+    """Render a colored week-by-week periodization strip up to the race.
+
+    The strip always spans the whole remaining block (from ``start_week``), while
+    ``current_week_start`` is the cell drawn with the highlight border — so the
+    strip stays stable as the reader switches weeks.
+    """
     cells = []
-    week = current_week_start
+    week = start_week or current_week_start
     guard = 0
     while week <= race_date and guard < 60:
         phase_name, _ = plan_phase.phase_for_week(week, race_date)
@@ -422,8 +477,17 @@ def _session_steps_html(presc: dict) -> str:
     return f"<div class='seg-list'>{''.join(out)}</div>"
 
 
-def _plan_list(sessions: pd.DataFrame) -> str:
-    """Render the week's sessions as an expandable list of structured cards."""
+def _plan_list(sessions: pd.DataFrame, key: str = "") -> str:
+    """Render the week's sessions as an expandable list of structured cards.
+
+    Parameters
+    ----------
+    sessions : pandas.DataFrame
+        Planned sessions for one week, with a ``status`` column.
+    key : str, optional
+        Unique prefix for the expand/collapse element ids. Required when several
+        weeks are rendered into the same document, or their ids would collide.
+    """
     if sessions.empty:
         return "<p>No sessions for this week.</p>"
 
@@ -454,9 +518,10 @@ def _plan_list(sessions: pd.DataFrame) -> str:
             f"{escape(why)}</div>" if why else ""
         )
 
+        sess_id = f"{key}{i}"
         items.append(
             f"<div class='sess'>"
-            f"<div class='sess-row' data-sess='{i}'>"
+            f"<div class='sess-row' data-sess='{sess_id}'>"
             f"<span class='zdot' style='background:{dot}'></span>"
             f"<div class='sess-main'>"
             f"<div class='sess-title'>{escape(str(r.title or ''))}{focus_html}</div>"
@@ -465,31 +530,47 @@ def _plan_list(sessions: pd.DataFrame) -> str:
             f"<span class='sdot' style='background:{status_color}' title='{status}'></span>"
             f"<span class='chev'>&#9662;</span>"
             f"</div>"
-            f"<div class='sess-body' id='psess{i}'>{_session_steps_html(presc)}"
+            f"<div class='sess-body' id='psess{sess_id}'>{_session_steps_html(presc)}"
             f"<div class='sess-purpose'>{escape(str(r.purpose or ''))}</div>{why_html}</div>"
             f"</div>"
         )
     return f"<div class='sess-list'>{''.join(items)}</div>"
 
 
-def _plan_section(plan: PlanView) -> str:
-    """Render the full training-plan section (cards, strip, sessions, methodology, zones)."""
-    if plan is None or plan.week is None:
-        return (
-            "<h2>Training plan</h2><div class='panel'><p>No plan generated yet — "
-            "run <code>python -m plan.context</code>, write the week JSON, then "
-            "<code>python -m plan.persist</code>.</p></div>"
+def _week_pills(weeks: list[dict], selected: str, race_date: date) -> str:
+    """Render the week selector as a row of pills, one per generated week."""
+    pills = []
+    for i, week in enumerate(weeks, start=1):
+        week_start = date.fromisoformat(week["week_start"])
+        is_race_week = week_start <= race_date <= week_start + timedelta(days=6)
+        label = "Race week" if is_race_week else f"Week {i}"
+        active = " active" if week["week_start"] == selected else ""
+        color = _PHASE_COLOR.get(week["phase"], "#94a3b8")
+        pills.append(
+            f'<button class="wk-pill{active}" data-week="{escape(week["week_start"])}">'
+            f'<span class="wk-dot" style="background:{color}"></span>'
+            f'<span class="wk-label">{label}</span>'
+            f'<span class="wk-date">{week_start.strftime("%d %b")}</span></button>'
         )
+    return f'<div class="wk-pills">{"".join(pills)}</div>'
 
-    week = plan.week
+
+def _week_body(plan: PlanView, week: dict, selected: str) -> str:
+    """Render one week's cards, phase strip, sessions and coach's note."""
     race_date = date.fromisoformat(week["race_date"])
     week_start = date.fromisoformat(week["week_start"])
+    block_start = date.fromisoformat(plan.weeks[0]["week_start"])
     days_to = (race_date - date.today()).days
+    sessions = plan.sessions_by_week.get(week["week_start"], pd.DataFrame())
 
+    countdown = f"{days_to}d" if days_to >= 0 else "done"
+    countdown_sub = "until race day" if days_to >= 0 else "race day passed"
+    remaining = week["weeks_to_race"]
+    weeks_sub = f"{remaining} week{'' if remaining == 1 else 's'} to race"
     cards = [
         ("Target race", week["target_race"].upper(), race_date.strftime("%d %b %Y")),
-        ("Countdown", f"{days_to}d", "until race day"),
-        ("Phase", week["phase"].title(), f"{week['weeks_to_race']} weeks to race"),
+        ("Countdown", countdown, countdown_sub),
+        ("Phase", week["phase"].title(), weeks_sub),
         (
             "Load target",
             f"{int(week['load_target_low'])}–{int(week['load_target_high'])}",
@@ -501,8 +582,39 @@ def _plan_section(plan: PlanView) -> str:
         f'<div class="card-value">{value}</div><div class="card-sub">{sub}</div></div>'
         for label, value, sub in cards
     )
-
     rationale = escape(str(week.get("rationale") or ""))
+    active = " active" if week["week_start"] == selected else ""
+
+    return f"""<div class="wk-body{active}" id="wk-{escape(week['week_start'])}">
+    <div class="cards">{card_html}</div>
+    <div class="panel">
+      <div class="section-label">Periodization</div>
+      {_phase_strip(race_date, week_start, start_week=block_start)}
+    </div>
+    <div class="panel">
+      <div class="section-label">Week of {week_start.strftime('%d %b %Y')}</div>
+      <p class="plan-hint">Hyrox-specific sessions only — running follows her own plan. Click a session to expand.</p>
+      {_plan_list(sessions, key=f"{week['week_start']}-")}
+      <p class="rationale"><b>Coach's note:</b> {rationale}</p>
+    </div>
+  </div>"""
+
+
+def _plan_section(plan: PlanView) -> str:
+    """Render the full training-plan section (week switcher, weeks, methodology, zones)."""
+    if plan is None or not plan.weeks:
+        return (
+            "<h2>Training plan</h2><div class='panel'><p>No plan generated yet — "
+            "run <code>python -m plan.context</code>, write the week JSON, then "
+            "<code>python -m plan.persist</code>.</p></div>"
+        )
+
+    selected = plan.selected_week or plan.weeks[0]["week_start"]
+    race_date = date.fromisoformat(plan.weeks[0]["race_date"])
+
+    # The methodology note is week-level but near-identical across a block; show
+    # the selected week's so it stays in step with what is being read.
+    week = plan.week or plan.weeks[0]
     model = escape(str(week.get("model") or ""))
     methodology = escape(str(week.get("methodology") or ""))
     methodology_html = f'<p class="methodology">{methodology}</p>' if methodology else ""
@@ -512,18 +624,11 @@ def _plan_section(plan: PlanView) -> str:
         src = str(plan.zones.iloc[0].get("source") or "")
         zone_source = " Estimated from max HR." if src == "max_hr_estimate" else " From Garmin's configured zones."
 
+    bodies = "".join(_week_body(plan, w, selected) for w in plan.weeks)
+
     return f"""<h2>Training plan</h2>
-  <div class="cards">{card_html}</div>
-  <div class="panel">
-    <div class="section-label">Periodization</div>
-    {_phase_strip(race_date, week_start)}
-  </div>
-  <div class="panel">
-    <div class="section-label">Week of {week_start.strftime('%d %b %Y')}</div>
-    <p class="plan-hint">Hyrox-specific sessions only — running follows her own plan. Click a session to expand.</p>
-    {_plan_list(plan.sessions)}
-    <p class="rationale"><b>Coach's note:</b> {rationale}</p>
-  </div>
+  {_week_pills(plan.weeks, selected, race_date)}
+  {bodies}
   <div class="panel">
     <div class="section-label">Methodology &amp; sources</div>
     {methodology_html}
@@ -613,6 +718,21 @@ def render_html(
   .phase-wk {{ font-size: 0.78rem; font-weight: 600; }}
   .phase-name {{ font-size: 0.72rem; color: #64748b; text-transform: capitalize; }}
   .plan-hint {{ font-size: 0.78rem; color: #94a3b8; margin: -2px 6px 12px; }}
+  /* week switcher */
+  .wk-pills {{ display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 4px;
+          margin-bottom: 18px; }}
+  .wk-pill {{ flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+          background: #fff; border: 1px solid #e2e8f0; border-radius: 999px;
+          padding: 8px 14px; cursor: pointer; font-size: 0.86rem; color: #475569;
+          font-family: inherit; }}
+  .wk-pill:hover {{ border-color: #cbd5e1; color: #0f172a; }}
+  .wk-pill.active {{ border-color: #2563eb; color: #0f172a; font-weight: 600;
+          box-shadow: 0 0 0 1px #2563eb inset; }}
+  .wk-dot {{ width: 8px; height: 8px; border-radius: 50%; flex: none; }}
+  .wk-date {{ color: #94a3b8; font-size: 0.78rem; }}
+  .wk-pill.active .wk-date {{ color: #64748b; }}
+  .wk-body {{ display: none; }}
+  .wk-body.active {{ display: block; }}
   .sess-list {{ display: flex; flex-direction: column; gap: 8px; }}
   .sess {{ border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }}
   .sess-row {{ display: flex; align-items: center; gap: 12px; padding: 12px 14px;
@@ -731,6 +851,14 @@ def render_html(
       btn.classList.add('active');
       document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
       window.dispatchEvent(new Event('resize'));  // let Plotly size the hidden chart
+    }});
+  }});
+  document.querySelectorAll('.wk-pill').forEach(function (pill) {{
+    pill.addEventListener('click', function () {{
+      document.querySelectorAll('.wk-pill').forEach(function (p) {{ p.classList.remove('active'); }});
+      document.querySelectorAll('.wk-body').forEach(function (b) {{ b.classList.remove('active'); }});
+      pill.classList.add('active');
+      document.getElementById('wk-' + pill.dataset.week).classList.add('active');
     }});
   }});
   document.querySelectorAll('.sess-row').forEach(function (row) {{

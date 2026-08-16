@@ -153,6 +153,68 @@ def fetch_latest_plan_week(supabase: Client) -> dict | None:
     return rows[0] if rows else None
 
 
+def fetch_plan_weeks(supabase: Client, since: str | None = None) -> list[dict]:
+    """Fetch generated plan-week headers in chronological order.
+
+    Parameters
+    ----------
+    supabase : supabase.Client
+        Authenticated Supabase client.
+    since : str, optional
+        ISO date; when given, only weeks starting on or after it are returned.
+        Used to drop weeks belonging to races already run.
+
+    Returns
+    -------
+    list of dict
+        ``training_plan_weeks`` rows ordered by ``week_start`` ascending.
+    """
+    request = supabase.table("training_plan_weeks").select("*").order("week_start")
+    if since is not None:
+        request = request.gte("week_start", since)
+    return request.execute().data or []
+
+
+def fetch_planned_sessions_multi(
+    supabase: Client, week_starts: list[str]
+) -> dict[str, pd.DataFrame]:
+    """Fetch sessions for several plan weeks in a single round trip.
+
+    Parameters
+    ----------
+    supabase : supabase.Client
+        Authenticated Supabase client.
+    week_starts : list of str
+        ISO dates of the plan weeks' Mondays.
+
+    Returns
+    -------
+    dict
+        Maps each requested ``week_start`` to its sessions, ordered by
+        ``session_date``. Weeks with no stored sessions map to an empty frame.
+    """
+    if not week_starts:
+        return {}
+
+    result = (
+        supabase.table("planned_sessions")
+        .select("*")
+        .in_("week_start", week_starts)
+        .order("session_date")
+        .execute()
+    )
+    rows = result.data or []
+    frame = pd.DataFrame(rows)
+
+    by_week: dict[str, pd.DataFrame] = {}
+    for week_start in week_starts:
+        if frame.empty:
+            by_week[week_start] = pd.DataFrame()
+        else:
+            by_week[week_start] = frame[frame["week_start"] == week_start].reset_index(drop=True)
+    return by_week
+
+
 def fetch_planned_sessions(supabase: Client, week_start: str) -> pd.DataFrame:
     """Fetch the prescribed sessions for a given plan week.
 
