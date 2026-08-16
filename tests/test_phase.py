@@ -33,6 +33,14 @@ def test_phase_boundaries() -> None:
     assert phase.classify_phase(0) == "off"
 
 
+def test_phase_for_september_race_block() -> None:
+    """The three weeks into the 2026-09-05 race run peak -> taper -> race week."""
+    race = date(2026, 9, 5)
+    assert phase.phase_for_week(date(2026, 8, 17), race) == ("peak", 3)
+    assert phase.phase_for_week(date(2026, 8, 24), race) == ("taper", 2)
+    assert phase.phase_for_week(date(2026, 8, 31), race) == ("taper", 1)
+
+
 def test_load_target_band_taper_cuts_volume() -> None:
     build_low, build_high = phase.load_target_band(700.0, "build")
     taper_low, taper_high = phase.load_target_band(700.0, "taper")

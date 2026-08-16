@@ -60,7 +60,9 @@ def _to_rows(week: PlannedWeek, week_start: date) -> list[dict[str, Any]]:
     return rows
 
 
-def persist(path: Path, cfg: PlanConfig = DEFAULT_CONFIG) -> int:
+def persist(
+    path: Path, cfg: PlanConfig = DEFAULT_CONFIG, week_start: date | None = None
+) -> int:
     """Validate and store the generated week.
 
     Parameters
@@ -69,6 +71,10 @@ def persist(path: Path, cfg: PlanConfig = DEFAULT_CONFIG) -> int:
         Path to the ``PlannedWeek`` JSON written by the agent.
     cfg : PlanConfig
         Plan configuration.
+    week_start : datetime.date, optional
+        Monday the plan belongs to. Defaults to the week encoded in the filename
+        (``plan_week_YYYY-MM-DD.json``) and then to the upcoming Monday, so a
+        block of future weeks can be stored without each overwriting the next.
 
     Returns
     -------
@@ -76,7 +82,8 @@ def persist(path: Path, cfg: PlanConfig = DEFAULT_CONFIG) -> int:
         Number of planned sessions written.
     """
     week = PlannedWeek.model_validate_json(path.read_text(encoding="utf-8"))
-    bundle = context.gather(cfg)
+    target_week = week_start or context.week_start_from_path(path)
+    bundle = context.gather(cfg, week_start=target_week)
     supabase = query.get_supabase_client()
 
     supabase.table("training_plan_weeks").upsert(
@@ -106,16 +113,57 @@ def persist(path: Path, cfg: PlanConfig = DEFAULT_CONFIG) -> int:
     return len(rows)
 
 
+def persist_all(cfg: PlanConfig = DEFAULT_CONFIG) -> int:
+    """Persist every dated ``plan_week_*.json`` in the data directory.
+
+    Weeks are stored oldest first so the plan block reads consistently if the run
+    is interrupted part-way.
+
+    Parameters
+    ----------
+    cfg : PlanConfig
+        Plan configuration.
+
+    Returns
+    -------
+    int
+        Total number of planned sessions written across all weeks.
+    """
+    paths = sorted(context.PLAN_DIR.glob(context.PLAN_FILE_GLOB))
+    if not paths:
+        raise FileNotFoundError(
+            f"No {context.PLAN_FILE_GLOB} files in {context.PLAN_DIR}; nothing to persist."
+        )
+    return sum(persist(path, cfg) for path in paths)
+
+
 def main() -> None:
     """Persist the plan JSON named on the command line (or the default path)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     parser = argparse.ArgumentParser(description="Persist a generated weekly plan.")
     parser.add_argument(
-        "path", nargs="?", default=str(context.PLAN_FILE),
+        "path", nargs="?", default=None,
         help="Path to the PlannedWeek JSON (default: data/plan_week.json)",
     )
+    parser.add_argument(
+        "--week-start",
+        help="Monday the plan belongs to (YYYY-MM-DD); overrides the filename.",
+    )
+    parser.add_argument(
+        "--all", action="store_true",
+        help=f"Persist every {context.PLAN_FILE_GLOB} in the data directory.",
+    )
     args = parser.parse_args()
-    persist(Path(args.path))
+
+    if args.all:
+        if args.path or args.week_start:
+            parser.error("--all cannot be combined with a path or --week-start")
+        total = persist_all()
+        logger.info("Persisted %d sessions across all plan weeks", total)
+        return
+
+    week_start = date.fromisoformat(args.week_start) if args.week_start else None
+    persist(Path(args.path or context.PLAN_FILE), week_start=week_start)
 
 
 if __name__ == "__main__":

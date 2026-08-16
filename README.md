@@ -73,6 +73,32 @@ python -m plan.persist      # validate + store the week
 python -m dashboard.build   # render public/index.html
 ```
 
+### Planning several weeks at once
+
+A whole block up to the race can be planned in one pass. Each week is written to
+its own `data/plan_week_<Monday>.json`; the date in the filename is what tells
+`plan.persist` which week the JSON belongs to.
+
+```bash
+python -m plan.context --all                    # a brief per remaining week
+python -m plan.persist --all                    # store every data/plan_week_*.json
+```
+
+Single weeks still work as before, and `--week-start` overrides the filename:
+
+```bash
+python -m plan.context --week-start 2026-08-24
+python -m plan.persist data/plan_week_2026-08-24.json
+```
+
+The dashboard's Training plan tab shows a week selector across every stored week
+for the current `race_date`, so the whole block is browsable from one page.
+
+> A week planned far in advance is built on **today's** recovery snapshot — the
+> load band and any auto-regulation reflect the day it was generated, not the day
+> it will be trained. Re-running the generator for a later week refreshes it
+> against current data.
+
 ## GitHub Actions
 
 The workflow runs daily at 09:00 UTC (and on manual dispatch): ingests Garmin

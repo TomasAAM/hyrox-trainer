@@ -15,6 +15,7 @@ Run with ``python -m plan.context`` to print the brief.
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from dataclasses import dataclass
@@ -44,6 +45,100 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
 PLAN_FILE = _PROJECT_ROOT / "data" / "plan_week.json"
+PLAN_DIR = _PROJECT_ROOT / "data"
+# Per-week filenames used when several weeks are planned in one pass; the bare
+# PLAN_FILE above remains the default for a single upcoming week.
+PLAN_FILE_GLOB = "plan_week_*.json"
+
+
+def plan_file_for(week_start: date) -> Path:
+    """Path of the ``PlannedWeek`` JSON for a specific week.
+
+    Parameters
+    ----------
+    week_start : datetime.date
+        Monday of the plan week.
+
+    Returns
+    -------
+    pathlib.Path
+        ``data/plan_week_YYYY-MM-DD.json``.
+
+    Examples
+    --------
+    >>> plan_file_for(date(2026, 8, 17)).name
+    'plan_week_2026-08-17.json'
+    """
+    return PLAN_DIR / f"plan_week_{week_start.isoformat()}.json"
+
+
+def week_start_from_path(path: Path) -> date | None:
+    """Recover the plan week encoded in a ``plan_week_YYYY-MM-DD.json`` filename.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        Path to a ``PlannedWeek`` JSON file.
+
+    Returns
+    -------
+    datetime.date or None
+        The encoded Monday, or ``None`` for the un-dated default filename.
+
+    Examples
+    --------
+    >>> week_start_from_path(Path("data/plan_week_2026-08-17.json"))
+    datetime.date(2026, 8, 17)
+    >>> week_start_from_path(Path("data/plan_week.json")) is None
+    True
+    """
+    stem = path.stem
+    prefix = "plan_week_"
+    if not stem.startswith(prefix):
+        return None
+    try:
+        return date.fromisoformat(stem[len(prefix):])
+    except ValueError:
+        return None
+
+
+def weeks_until_race(cfg: PlanConfig, today: date | None = None) -> list[date]:
+    """List every plan week's Monday from the upcoming one through the race week.
+
+    Parameters
+    ----------
+    cfg : PlanConfig
+        Plan configuration supplying the race date.
+    today : datetime.date, optional
+        Reference date; defaults to today.
+
+    Returns
+    -------
+    list of datetime.date
+        Mondays from :func:`plan.phase.upcoming_monday` up to and including the
+        Monday of the race week. Empty when the race has already passed.
+
+    Examples
+    --------
+    >>> from plan.config import PlanConfig
+    >>> cfg = PlanConfig(target_race="hyrox", race_date=date(2026, 9, 5),
+    ...                  division="Women's Pro", sessions_per_week=6,
+    ...                  strength_per_week=2, rest_days=(), model="claude-code",
+    ...                  recent_window_days=28, gym_access="full",
+    ...                  running_source="fixed")
+    >>> weeks_until_race(cfg, date(2026, 8, 16))
+    [datetime.date(2026, 8, 17), datetime.date(2026, 8, 24), datetime.date(2026, 8, 31)]
+    """
+    reference = today or date.today()
+    first = phase.upcoming_monday(reference)
+    if cfg.race_date < first:
+        return []
+    weeks: list[date] = []
+    week = first
+    while week <= cfg.race_date:
+        weeks.append(week)
+        week += timedelta(days=7)
+    return weeks
 
 
 @dataclass(frozen=True)
@@ -153,13 +248,18 @@ def _scheduled_runs(cfg: PlanConfig, week_start: date, supabase=None) -> list[di
         return []
 
 
-def gather(cfg: PlanConfig = DEFAULT_CONFIG) -> ContextBundle:
+def gather(cfg: PlanConfig = DEFAULT_CONFIG, week_start: date | None = None) -> ContextBundle:
     """Pull recent data and compute the deterministic plan context.
 
     Parameters
     ----------
     cfg : PlanConfig
         Plan configuration (race date, availability, etc.).
+    week_start : datetime.date, optional
+        Monday of the week to plan. Defaults to the upcoming Monday. Pass an
+        explicit Monday to build a week further out — note that the recent-data
+        summary is always *today's* snapshot, so a week planned well in advance
+        is provisional until regenerated closer to the date.
 
     Returns
     -------
@@ -178,7 +278,7 @@ def gather(cfg: PlanConfig = DEFAULT_CONFIG) -> ContextBundle:
     load_series = metrics.build_load_series(activities)
     snapshot = metrics.latest_snapshot(load_series, hrv_series)
 
-    week_start = phase.upcoming_monday(date.today())
+    week_start = week_start or phase.upcoming_monday(date.today())
     phase_name, weeks_remaining = phase.phase_for_week(week_start, cfg.race_date)
     load_band = phase.load_target_band(snapshot.ctl * 7.0, phase_name)
     summary = _recent_summary(activities, load_series, snapshot, readiness, cfg.recent_window_days)
@@ -357,15 +457,40 @@ GUARDRAILS:
   - Fill `why` for every session (the justification AND the trade-off — why not more), and the
     week-level `methodology` (principles only). Do NOT invent citations; sources are curated separately.
 
-OUTPUT: write JSON matching this shape to {PLAN_FILE}, then run `python -m plan.persist`:
+OUTPUT: write JSON matching this shape to {plan_file_for(bundle.week_start)}, then run
+`python -m plan.persist --week-start {bundle.week_start.isoformat()}`:
 {json.dumps(schema_example, indent=2)}
 """
 
 
 def main() -> None:
-    """Print the generation brief to stdout."""
+    """Print the generation brief(s) to stdout.
+
+    With ``--all`` every remaining week up to the race is printed, separated by a
+    rule, so a whole block can be written in one pass.
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    print(render_brief(gather()))
+    parser = argparse.ArgumentParser(description="Print the plan generation brief.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--week-start", help="Monday of the week to plan (YYYY-MM-DD); default: upcoming Monday."
+    )
+    group.add_argument(
+        "--all", action="store_true",
+        help="Print a brief for every remaining week up to the race.",
+    )
+    args = parser.parse_args()
+
+    if args.all:
+        weeks = weeks_until_race(DEFAULT_CONFIG)
+        for i, week in enumerate(weeks):
+            if i:
+                print("\n" + "=" * 78 + "\n")
+            print(render_brief(gather(week_start=week)))
+        return
+
+    week_start = date.fromisoformat(args.week_start) if args.week_start else None
+    print(render_brief(gather(week_start=week_start)))
 
 
 if __name__ == "__main__":
