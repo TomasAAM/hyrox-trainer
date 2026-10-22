@@ -41,6 +41,18 @@ def test_phase_for_september_race_block() -> None:
     assert phase.phase_for_week(date(2026, 8, 31), race) == ("taper", 1)
 
 
+def test_no_taper_week_makes_race_week_the_peak() -> None:
+    """With taper_weeks=0 the November block is build, build, peak (race week)."""
+    race = date(2026, 11, 14)
+    assert phase.phase_for_week(date(2026, 10, 26), race, 0) == ("build", 3)
+    assert phase.phase_for_week(date(2026, 11, 2), race, 0) == ("build", 2)
+    assert phase.phase_for_week(date(2026, 11, 9), race, 0) == ("peak", 1)
+
+
+def test_default_taper_is_unchanged() -> None:
+    assert phase.classify_phase(2, 2) == phase.classify_phase(2) == "taper"
+
+
 def test_load_target_band_taper_cuts_volume() -> None:
     build_low, build_high = phase.load_target_band(700.0, "build")
     taper_low, taper_high = phase.load_target_band(700.0, "taper")

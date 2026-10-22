@@ -279,7 +279,9 @@ def gather(cfg: PlanConfig = DEFAULT_CONFIG, week_start: date | None = None) -> 
     snapshot = metrics.latest_snapshot(load_series, hrv_series)
 
     week_start = week_start or phase.upcoming_monday(date.today())
-    phase_name, weeks_remaining = phase.phase_for_week(week_start, cfg.race_date)
+    phase_name, weeks_remaining = phase.phase_for_week(
+        week_start, cfg.race_date, cfg.taper_weeks
+    )
     load_band = phase.load_target_band(snapshot.ctl * 7.0, phase_name)
     summary = _recent_summary(activities, load_series, snapshot, readiness, cfg.recent_window_days)
 

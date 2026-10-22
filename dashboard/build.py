@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pandas as pd
 from dotenv import load_dotenv
 
 from dashboard import metrics, query, render, zones
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 _OUTPUT_PATH = _PROJECT_ROOT / "public" / "index.html"
 
 
-def _build_plan_view(supabase, activities, zones_df) -> render.PlanView:
+def _build_plan_view(supabase, activities, zones_df, scored: bool = True) -> render.PlanView:
     """Assemble the training-plan view model for every week of the current race.
 
     Reads all generated weeks targeting the configured race date and their
@@ -42,6 +43,9 @@ def _build_plan_view(supabase, activities, zones_df) -> render.PlanView:
         Activities used to score session adherence.
     zones_df : pandas.DataFrame
         Heart-rate zones for the plan section.
+    scored : bool, optional
+        Whether to score adherence against ``activities``. ``False`` leaves every
+        session ``upcoming``, for when the activities belong to someone else.
 
     Returns
     -------
@@ -57,7 +61,11 @@ def _build_plan_view(supabase, activities, zones_df) -> render.PlanView:
 
     week_starts = [w["week_start"] for w in weeks]
     sessions_by_week = {
-        week_start: metrics.compute_adherence(sessions, activities)
+        week_start: (
+            metrics.compute_adherence(sessions, activities)
+            if scored
+            else sessions.assign(status="upcoming")
+        )
         for week_start, sessions in query.fetch_planned_sessions_multi(
             supabase, week_starts
         ).items()
@@ -68,6 +76,7 @@ def _build_plan_view(supabase, activities, zones_df) -> render.PlanView:
         sessions_by_week=sessions_by_week,
         zones=zones_df,
         selected_week=render.default_selected_week(weeks),
+        taper_weeks=DEFAULT_CONFIG.taper_weeks,
     )
 
 
@@ -76,6 +85,16 @@ def main() -> None:
     logger.info("Building dashboard")
 
     supabase = query.get_supabase_client()
+
+    if not DEFAULT_CONFIG.athlete_data_connected:
+        # None of the stored Garmin data is hers, so render the plan alone: no
+        # load model, no zones, no adherence scoring against someone else's sessions.
+        plan_view = _build_plan_view(supabase, None, pd.DataFrame(), scored=False)
+        _OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _OUTPUT_PATH.write_text(render.render_plan_only(plan_view), encoding="utf-8")
+        logger.info("Plan-only dashboard written to %s", _OUTPUT_PATH)
+        return
+
     activities = query.fetch_activities(supabase)
     hrv_raw = query.fetch_hrv(supabase)
     zones_df = query.fetch_training_zones(supabase)

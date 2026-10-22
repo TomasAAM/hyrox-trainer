@@ -86,6 +86,15 @@ def persist(
     bundle = context.gather(cfg, week_start=target_week)
     supabase = query.get_supabase_client()
 
+    # Without her own Garmin data the load band and recovery snapshot would be
+    # someone else's, so store neither rather than present them as hers.
+    if cfg.athlete_data_connected:
+        load_band: tuple[float | None, float | None] = bundle.load_band
+        input_summary: dict[str, Any] = bundle.summary
+    else:
+        load_band = (None, None)
+        input_summary = {"recovery_data": "not connected: planned without load or recovery data"}
+
     supabase.table("training_plan_weeks").upsert(
         {
             "week_start": bundle.week_start.isoformat(),
@@ -93,10 +102,10 @@ def persist(
             "race_date": cfg.race_date.isoformat(),
             "phase": bundle.phase_name,
             "weeks_to_race": bundle.weeks_remaining,
-            "load_target_low": bundle.load_band[0],
-            "load_target_high": bundle.load_band[1],
+            "load_target_low": load_band[0],
+            "load_target_high": load_band[1],
             "model": _GENERATOR,
-            "input_summary": bundle.summary,
+            "input_summary": input_summary,
             "rationale": week.rationale,
             "methodology": week.methodology,
         },

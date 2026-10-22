@@ -60,6 +60,13 @@ Edit `plan/config.py` → `DEFAULT_CONFIG`:
 - `race_date` — her real race date (currently a placeholder).
 - `sessions_per_week` / `strength_per_week` — her weekly Hyrox availability.
 - `ATHLETE_LOADS` — her known station capacities.
+- `taper_weeks` — whole weeks of taper before the race (default 2). `0` means no
+  taper week: the race week is the peak and she eases off only in its last days.
+- `athlete_data_connected` — whether the Garmin data in the database is **hers**.
+  While `False`, plans are stored without a load band or recovery snapshot and the
+  dashboard renders the plan only (no load chart, form cards, zones or adherence
+  scoring), so another person's data is never shown as hers. Set it to `True` once
+  her own Garmin is connected (`python -m ingest.bootstrap_token` from her account).
 
 ### 4. Run the pipeline
 

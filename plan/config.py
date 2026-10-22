@@ -48,6 +48,15 @@ class PlanConfig:
     running_days : tuple of str
         Fallback fixed running weekdays, used only when ``running_source`` is
         "fixed" or Garmin has no scheduled runs for the plan week.
+    taper_weeks : int
+        Whole weeks before the race that count as taper (``plan.phase``). ``0``
+        means no taper week: the race week is the peak and any easing off is only
+        the last days inside it.
+    athlete_data_connected : bool
+        Whether the Garmin data in the database belongs to this athlete. When
+        ``False`` the plan is stored without a load band or recovery snapshot, and
+        the dashboard shows the plan only, so another person's load and zones are
+        never presented as hers.
     """
 
     target_race: str
@@ -61,6 +70,8 @@ class PlanConfig:
     gym_access: str
     running_source: str
     running_days: tuple[str, ...] = field(default_factory=tuple)
+    taper_weeks: int = 2
+    athlete_data_connected: bool = True
 
 
 # The eight Hyrox stations, in race order, the generator draws functional work from.
@@ -114,15 +125,17 @@ ATHLETE_LOADS: dict[str, str] = {
 }
 
 
-# Current target: Hyrox on 2026-09-05, the next race after the 2026-08-02 Doubles
-# race. Daily, undulated Hyrox program (~6 substantive sessions + an active-recovery
-# day). Her interval RUN days are Monday and Wednesday (per her own report — this
-# overrides the Garmin calendar, which disagreed), so running_source is "fixed": on
-# those days the Hyrox work is upper-body/technique to spare her running legs, and
-# the hard Hyrox sessions land on the other days.
+# Current target: Hybrid Monkey VI, La Reina, on 2026-11-14 -- a HYROX simulator
+# raced as mixed doubles Open with her brother (the 2026-09-05 race has passed).
+# Partners run each 1 km together and split the stations, so station efforts are
+# shorter and harder with partner rest. Daily, undulated Hyrox program (~6
+# substantive sessions + an active-recovery day). Her interval RUN days are Monday
+# and Wednesday (per her own report -- this overrides the Garmin calendar), so
+# running_source is "fixed": on those days the Hyrox work is upper-body/technique to
+# spare her running legs, and the hard Hyrox sessions land on the other days.
 DEFAULT_CONFIG = PlanConfig(
     target_race="hyrox",
-    race_date=date(2026, 9, 5),
+    race_date=date(2026, 11, 14),
     division=HYROX_DIVISION,
     sessions_per_week=6,
     strength_per_week=2,
@@ -132,4 +145,10 @@ DEFAULT_CONFIG = PlanConfig(
     gym_access="full",
     running_source="fixed",
     running_days=("Monday", "Wednesday"),
+    # The Garmin account currently ingested is not hers (it carries her partner's
+    # life-optimizer workouts). Flip to True once her own Garmin is connected.
+    athlete_data_connected=False,
+    # Deliberately short taper: she trains through race week and eases off only on
+    # the Thursday (activation) and Friday (rest) before the race.
+    taper_weeks=0,
 )

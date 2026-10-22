@@ -11,6 +11,9 @@ Phase map (by whole weeks remaining until the race):
 * ``3``     peak        — highest specificity, race simulation
 * ``1..2``  taper       — cut volume, retain intensity, arrive fresh
 * ``<= 0``  off         — race done / transition
+
+The default above assumes a two-week taper. ``taper_weeks`` shortens it: with
+``taper_weeks=0`` the race week is the peak and there is no taper week at all.
 """
 
 from __future__ import annotations
@@ -57,31 +60,46 @@ def weeks_to_race(week_start: date, race_date: date) -> int:
     return math.ceil(days / 7)
 
 
-def classify_phase(weeks_remaining: int) -> str:
+def classify_phase(weeks_remaining: int, taper_weeks: int = 2) -> str:
     """Map whole weeks remaining to a periodization phase.
 
     Parameters
     ----------
     weeks_remaining : int
         Output of :func:`weeks_to_race`.
+    taper_weeks : int, optional
+        How many whole weeks before the race count as taper. The single week
+        before them is the peak. ``0`` means no taper week: the race week itself
+        is the peak, and any easing off is only the last days inside it.
 
     Returns
     -------
     str
         One of ``base``, ``build``, ``peak``, ``taper``, ``off``.
+
+    Examples
+    --------
+    >>> classify_phase(1)
+    'taper'
+    >>> classify_phase(1, taper_weeks=0)
+    'peak'
+    >>> classify_phase(2, taper_weeks=0)
+    'build'
     """
     if weeks_remaining <= 0:
         return "off"
-    if weeks_remaining <= 2:
+    if weeks_remaining <= taper_weeks:
         return "taper"
-    if weeks_remaining == 3:
+    if weeks_remaining == taper_weeks + 1:
         return "peak"
     if weeks_remaining <= 8:
         return "build"
     return "base"
 
 
-def phase_for_week(week_start: date, race_date: date) -> tuple[str, int]:
+def phase_for_week(
+    week_start: date, race_date: date, taper_weeks: int = 2
+) -> tuple[str, int]:
     """Return the phase and weeks-remaining for a plan week.
 
     Parameters
@@ -90,6 +108,8 @@ def phase_for_week(week_start: date, race_date: date) -> tuple[str, int]:
         Monday of the plan week.
     race_date : datetime.date
         Date of the target race.
+    taper_weeks : int, optional
+        Whole weeks of taper; see :func:`classify_phase`.
 
     Returns
     -------
@@ -97,7 +117,7 @@ def phase_for_week(week_start: date, race_date: date) -> tuple[str, int]:
         The phase label and the whole weeks remaining until the race.
     """
     remaining = weeks_to_race(week_start, race_date)
-    return classify_phase(remaining), remaining
+    return classify_phase(remaining, taper_weeks), remaining
 
 
 def load_target_band(weekly_chronic_load: float, phase: str) -> tuple[float, float]:
