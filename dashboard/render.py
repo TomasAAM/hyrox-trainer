@@ -16,35 +16,36 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from dashboard import styles, theme
 from dashboard import zones as zones_mod
 from dashboard.metrics import CTL_WARMUP_DAYS, ReadinessSnapshot
 from plan import phase as plan_phase
 
-_COLOR_CTL = "#2563eb"   # blue  - fitness
-_COLOR_ATL = "#f97316"   # orange - fatigue
-_COLOR_TSB = "#16a34a"   # green - form
-_COLOR_LOAD = "#cbd5e1"  # grey  - daily load bars
-_COLOR_HRV = "#7c3aed"   # violet - nightly HRV
-_COLOR_BAND = "rgba(124, 58, 237, 0.15)"  # HRV baseline band fill
+_COLOR_CTL = theme.COLOR_CTL     # blue   - fitness
+_COLOR_ATL = theme.COLOR_ATL     # orange - fatigue
+_COLOR_TSB = theme.COLOR_TSB     # green  - form
+_COLOR_LOAD = theme.COLOR_LOAD   # grey   - daily load bars
+_COLOR_HRV = theme.COLOR_HRV     # violet - nightly HRV
+_COLOR_BAND = theme.COLOR_BAND   # HRV baseline band fill
 
-# Colors for the periodization strip and the session status badges.
+# Periodization strip colours: saturated data marks, identical in both schemes.
 _PHASE_COLOR = {
     "base": "#0ea5e9", "build": "#2563eb", "peak": "#f97316",
     "taper": "#16a34a", "off": "#94a3b8",
 }
-_STATUS_COLOR = {
-    "done": "#16a34a", "missed": "#dc2626", "upcoming": "#94a3b8", "rest": "#cbd5e1",
+# Status and intensity are tinted surfaces rather than saturated marks, so they
+# carry a CSS class instead of an inline colour: an inline style cannot answer
+# ``prefers-color-scheme``, and these need a different tint per scheme.
+_STATUS_CLASS = {
+    "done": "s-done", "partial": "s-partial", "swapped": "s-swapped",
+    "missed": "s-missed", "upcoming": "s-upcoming", "rest": "s-rest",
 }
-# Zone accent dot (easiest → hardest) and intensity pill (bg, text).
+# Zone accent dot (easiest -> hardest).
 _ZONE_DOT = {
     "Recovery": "#639922", "Endurance": "#97C459", "Aerobic": "#EF9F27",
     "Threshold": "#D85A30", "Maximum": "#E24B4A", "mixed": "#64748b",
 }
-_INTENSITY_BADGE = {
-    "hard": ("#fef2f2", "#dc2626"),
-    "moderate": ("#fffbeb", "#b45309"),
-    "easy": ("#f0fdf4", "#16a34a"),
-}
+_INTENSITY_CLASS = {"hard": "i-hard", "moderate": "i-moderate", "easy": "i-easy"}
 # Runna-style phase bands (saturated) and per-segment type tags.
 _PHASE_BAND = {
     "warmup": ("Warm-up", "#e0683a"),
@@ -81,24 +82,103 @@ _METHODOLOGY_SOURCES = [
      "Acute responses & determinants in Hyrox 2025 (Frontiers) — limited literature", "emerging",
      "https://pmc.ncbi.nlm.nih.gov/articles/PMC11994925/"),
 ]
-_TIER_BADGE = {
-    "strong": ("#f0fdf4", "#16a34a"),
-    "contested": ("#fffbeb", "#b45309"),
-    "emerging": ("#f1f5f9", "#475569"),
-}
+_TIER_CLASS = {"strong": "t-strong", "contested": "t-contested", "emerging": "t-emerging"}
 
 
 def _methodology_sources_html() -> str:
     """Render the static, vetted sources list (claim, citation link, evidence tier)."""
     rows = []
     for claim, cite, tier, url in _METHODOLOGY_SOURCES:
-        bg, fg = _TIER_BADGE.get(tier, ("#f1f5f9", "#475569"))
+        tier_class = _TIER_CLASS.get(tier, "t-emerging")
         rows.append(
             f"<div class='src'><div class='src-main'><div class='src-claim'>{escape(claim)}</div>"
             f"<a class='src-cite' href='{escape(url)}' target='_blank' rel='noopener'>{escape(cite)}</a></div>"
-            f"<span class='tier' style='background:{bg};color:{fg}'>{tier}</span></div>"
+            f"<span class='tier {tier_class}'>{tier}</span></div>"
         )
     return f"<div class='src-list'>{''.join(rows)}</div>"
+
+
+# The page's behaviour, kept out of the document f-string so the braces need no
+# doubling. ``__CHART_THEME__`` is substituted by :func:`_page_script`.
+_PAGE_SCRIPT = """
+  document.querySelectorAll('.tab-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
+      document.querySelectorAll('.tab-panel').forEach(function (p) { p.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+      window.dispatchEvent(new Event('resize'));  // let Plotly size the hidden chart
+    });
+  });
+
+  // Week pills and periodization-strip cells both select a week.
+  function selectWeek(wk) {
+    var body = document.getElementById('wk-' + wk);
+    if (!body) { return; }
+    document.querySelectorAll('.wk-body').forEach(function (b) { b.classList.toggle('active', b === body); });
+    document.querySelectorAll('.wk-pill').forEach(function (p) { p.classList.toggle('active', p.dataset.week === wk); });
+    document.querySelectorAll('.phase-cell').forEach(function (c) {
+      var on = c.dataset.week === wk;
+      c.classList.toggle('selected', on);
+      c.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  document.querySelectorAll('.wk-pill, .phase-cell').forEach(function (el) {
+    el.addEventListener('click', function () { selectWeek(el.dataset.week); });
+  });
+  document.querySelectorAll('.sess-row').forEach(function (row) {
+    row.addEventListener('click', function () {
+      row.classList.toggle('open');
+      document.getElementById('psess' + row.dataset.sess).classList.toggle('open');
+    });
+  });
+
+  // Plotly bakes its colours into the document at build time, so the figures are
+  // recoloured here to match the scheme the browser actually resolved, and again
+  // whenever the OS flips it. Axis keys are read off each figure rather than
+  // assumed, so a subplot gains no phantom axes.
+  var CHART_THEME = __CHART_THEME__;
+  var darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  var AXIS_KEY = /^[xy]axis[0-9]*$/;
+
+  function applyChartTheme() {
+    var t = CHART_THEME[darkQuery.matches ? 'dark' : 'light'];
+    document.querySelectorAll('.js-plotly-plot').forEach(function (gd) {
+      if (!gd.layout) { return; }
+      var update = {};
+      Object.keys(t.figure).forEach(function (k) { update[k] = t.figure[k]; });
+      Object.keys(gd.layout).forEach(function (key) {
+        if (!AXIS_KEY.test(key)) { return; }
+        Object.keys(t.axis).forEach(function (prop) {
+          update[key + '.' + prop] = t.axis[prop];
+        });
+        if (gd.layout[key].rangeslider) {
+          update[key + '.rangeslider.bgcolor'] = 'rgba(0,0,0,0)';
+          update[key + '.rangeslider.bordercolor'] = t.axis.linecolor;
+        }
+      });
+      Plotly.relayout(gd, update);
+    });
+  }
+
+  applyChartTheme();
+  darkQuery.addEventListener('change', applyChartTheme);
+
+  // Retire the entrance animation once it has played, so switching tabs shows
+  // its data immediately instead of replaying a stagger.
+  window.setTimeout(function () { document.body.classList.remove('intro'); }, 900);
+"""
+
+
+def _page_script() -> str:
+    """Return the page's JavaScript with the chart palettes substituted in.
+
+    Returns
+    -------
+    str
+        Script body for the document's single inline ``<script>`` element.
+    """
+    return _PAGE_SCRIPT.replace("__CHART_THEME__", theme.chart_theme_js())
 
 
 @dataclass(frozen=True)
@@ -258,7 +338,7 @@ def build_figure(load_series: pd.DataFrame, hrv_series: pd.DataFrame) -> go.Figu
         fig.add_vrect(
             x0=load_series.index[0],
             x1=warmup_end,
-            fillcolor="rgba(148, 163, 184, 0.12)",
+            fillcolor="rgba(122, 128, 139, 0.12)",
             line_width=0,
             row=1,
             col=1,
@@ -268,7 +348,7 @@ def build_figure(load_series: pd.DataFrame, hrv_series: pd.DataFrame) -> go.Figu
         )
 
     # Zero reference for TSB on the secondary axis.
-    fig.add_hline(y=0, line=dict(color="#94a3b8", width=1, dash="dash"),
+    fig.add_hline(y=0, line=dict(color=theme.COLOR_REFERENCE, width=1, dash="dash"),
                   row=1, col=1, secondary_y=True)
 
     # --- Row 2: HRV nightly + baseline band ---
@@ -318,13 +398,15 @@ def build_figure(load_series: pd.DataFrame, hrv_series: pd.DataFrame) -> go.Figu
     fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.05), row=2, col=1)
 
     fig.update_layout(
-        height=760,
-        template="plotly_white",
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="left", x=0),
-        margin=dict(l=60, r=30, t=70, b=30),
-        barmode="overlay",
+        **theme.chart_layout(
+            height=760,
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.09, xanchor="left", x=0),
+            margin=dict(l=60, r=30, t=100, b=30),
+            barmode="overlay",
+        )
     )
+    fig.update_annotations(font=dict(family=theme.FONT_SANS, size=13))
     return fig
 
 
@@ -417,7 +499,7 @@ def _phase_strip(race_date: date, current_week_start: date, start_week: date | N
     """Render a colored week-by-week periodization strip up to the race.
 
     The strip always spans the whole remaining block (from ``start_week``), while
-    ``current_week_start`` is the cell drawn with the highlight border — so the
+    ``current_week_start`` is the cell drawn with the selection ring — so the
     strip stays stable as the reader switches weeks.
     """
     cells = []
@@ -426,12 +508,13 @@ def _phase_strip(race_date: date, current_week_start: date, start_week: date | N
     while week <= race_date and guard < 60:
         phase_name, _ = plan_phase.phase_for_week(week, race_date)
         color = _PHASE_COLOR.get(phase_name, "#94a3b8")
-        border = "2px solid #0f172a" if week == current_week_start else "1px solid #e2e8f0"
+        selected = week == current_week_start
         cells.append(
-            f'<div class="phase-cell" style="border:{border}">'
+            f'<button type="button" class="phase-cell{" selected" if selected else ""}" '
+            f'data-week="{week.isoformat()}" aria-pressed="{"true" if selected else "false"}">'
             f'<div class="phase-dot" style="background:{color}"></div>'
             f'<div class="phase-wk">{week.strftime("%d %b")}</div>'
-            f'<div class="phase-name">{phase_name}</div></div>'
+            f'<div class="phase-name">{phase_name}</div></button>'
         )
         week += timedelta(days=7)
         guard += 1
@@ -508,9 +591,9 @@ def _plan_list(sessions: pd.DataFrame, key: str = "") -> str:
         focus = getattr(r, "hyrox_focus", None)
         focus_html = f"<span class='focus'>{escape(str(focus))}</span>" if focus else ""
         dot = _ZONE_DOT.get(r.zone, "#94a3b8")
-        bg, fg = _INTENSITY_BADGE.get(r.intensity, ("#f1f5f9", "#475569"))
+        intensity_class = _INTENSITY_CLASS.get(r.intensity, "i-none")
         status = getattr(r, "status", "upcoming")
-        status_color = _STATUS_COLOR.get(status, "#cbd5e1")
+        status_class = _STATUS_CLASS.get(status, "s-upcoming")
 
         why = str(presc.get("why", "") or "")
         why_html = (
@@ -526,8 +609,8 @@ def _plan_list(sessions: pd.DataFrame, key: str = "") -> str:
             f"<div class='sess-main'>"
             f"<div class='sess-title'>{escape(str(r.title or ''))}{focus_html}</div>"
             f"<div class='sess-meta'>{' · '.join(meta)}</div></div>"
-            f"<span class='ibadge' style='background:{bg};color:{fg}'>{escape(str(r.intensity or ''))}</span>"
-            f"<span class='sdot' style='background:{status_color}' title='{status}'></span>"
+            f"<span class='ibadge {intensity_class}'>{escape(str(r.intensity or ''))}</span>"
+            f"<span class='sdot {status_class}' title='{status}'></span>"
             f"<span class='chev'>&#9662;</span>"
             f"</div>"
             f"<div class='sess-body' id='psess{sess_id}'>{_session_steps_html(presc)}"
@@ -686,132 +769,19 @@ def render_html(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Hyrox Training</title>
-<style>
-  :root {{ color-scheme: light; }}
-  body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-         margin: 0; background: #f8fafc; color: #0f172a; }}
-  .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px 18px 60px; }}
-  h1 {{ font-size: 1.5rem; margin: 0 0 2px; }}
-  .as-of {{ color: #64748b; font-size: 0.9rem; margin-bottom: 20px; }}
-  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-           gap: 12px; margin-bottom: 24px; }}
-  .card {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 12px;
-          padding: 16px 18px; }}
-  .card-label {{ font-size: 0.8rem; color: #64748b; }}
-  .card-value {{ font-size: 1.8rem; font-weight: 600; margin: 4px 0; }}
-  .card-sub {{ font-size: 0.8rem; color: #475569; }}
-  .panel {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 12px;
-           padding: 10px; margin-bottom: 24px; }}
-  h2 {{ font-size: 1.1rem; margin: 8px 4px 12px; }}
-  table.weekly {{ width: 100%; border-collapse: collapse; font-size: 0.92rem; }}
-  table.weekly th, table.weekly td {{ text-align: left; padding: 8px 10px;
-          border-bottom: 1px solid #e2e8f0; }}
-  table.weekly th {{ color: #64748b; font-weight: 600; }}
-  table.weekly tr:first-child td {{ font-weight: 600; }}
-  .section-label {{ font-size: 0.8rem; color: #64748b; font-weight: 600;
-          text-transform: uppercase; letter-spacing: 0.03em; margin: 4px 6px 10px; }}
-  .phase-strip {{ display: flex; gap: 6px; overflow-x: auto; padding: 4px 2px 8px; }}
-  .phase-cell {{ flex: 0 0 auto; min-width: 78px; border-radius: 10px; padding: 8px 10px;
-          text-align: center; background: #fff; }}
-  .phase-dot {{ width: 100%; height: 5px; border-radius: 3px; margin-bottom: 6px; }}
-  .phase-wk {{ font-size: 0.78rem; font-weight: 600; }}
-  .phase-name {{ font-size: 0.72rem; color: #64748b; text-transform: capitalize; }}
-  .plan-hint {{ font-size: 0.78rem; color: #94a3b8; margin: -2px 6px 12px; }}
-  /* week switcher */
-  .wk-pills {{ display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 4px;
-          margin-bottom: 18px; }}
-  .wk-pill {{ flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
-          background: #fff; border: 1px solid #e2e8f0; border-radius: 999px;
-          padding: 8px 14px; cursor: pointer; font-size: 0.86rem; color: #475569;
-          font-family: inherit; }}
-  .wk-pill:hover {{ border-color: #cbd5e1; color: #0f172a; }}
-  .wk-pill.active {{ border-color: #2563eb; color: #0f172a; font-weight: 600;
-          box-shadow: 0 0 0 1px #2563eb inset; }}
-  .wk-dot {{ width: 8px; height: 8px; border-radius: 50%; flex: none; }}
-  .wk-date {{ color: #94a3b8; font-size: 0.78rem; }}
-  .wk-pill.active .wk-date {{ color: #64748b; }}
-  .wk-body {{ display: none; }}
-  .wk-body.active {{ display: block; }}
-  .sess-list {{ display: flex; flex-direction: column; gap: 8px; }}
-  .sess {{ border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }}
-  .sess-row {{ display: flex; align-items: center; gap: 12px; padding: 12px 14px;
-          cursor: pointer; background: #fff; }}
-  .sess-row:hover {{ background: #f8fafc; }}
-  .zdot {{ width: 10px; height: 10px; border-radius: 50%; flex: none; }}
-  .sess-main {{ flex: 1; min-width: 0; }}
-  .sess-title {{ font-size: 0.95rem; font-weight: 600; }}
-  .sess-meta {{ font-size: 0.8rem; color: #64748b; margin-top: 2px; }}
-  .ibadge {{ font-size: 0.72rem; font-weight: 600; border-radius: 6px; padding: 2px 8px;
-          text-transform: capitalize; white-space: nowrap; }}
-  .sdot {{ width: 8px; height: 8px; border-radius: 50%; flex: none; }}
-  .chev {{ color: #94a3b8; font-size: 0.7rem; transition: transform 0.15s; }}
-  .sess-row.open .chev {{ transform: rotate(180deg); }}
-  .sess-body {{ display: none; padding: 4px 14px 14px 36px; background: #fff;
-          border-top: 1px solid #f1f5f9; }}
-  .sess-body.open {{ display: block; }}
-  .sess-step {{ display: flex; gap: 10px; align-items: baseline; padding: 5px 0; }}
-  .sess-step .sk {{ min-width: 84px; font-size: 0.78rem; color: #64748b; }}
-  .sess-step .sv {{ font-size: 0.88rem; color: #334155; line-height: 1.5; }}
-  .seg-list {{ border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; margin-top: 4px; }}
-  .seg-band {{ padding: 6px 12px; font-size: 0.74rem; font-weight: 600; color: #fff;
-          letter-spacing: 0.03em; }}
-  .seg-row {{ display: flex; align-items: center; gap: 10px; padding: 9px 12px;
-          border-top: 1px solid #f1f5f9; }}
-  .seg-list > .seg-row:first-child {{ border-top: none; }}
-  .seg-num {{ width: 16px; text-align: center; color: #94a3b8; font-size: 0.78rem; flex: none; }}
-  .seg-main {{ flex: 1; min-width: 0; }}
-  .seg-metric {{ font-size: 0.9rem; color: #0f172a; }}
-  .seg-metric b {{ font-weight: 600; }}
-  .seg-load {{ color: #334155; font-weight: 600; }}
-  .seg-target {{ font-size: 0.78rem; color: #64748b; margin-top: 1px; }}
-  .seg-tag {{ font-size: 0.66rem; font-weight: 600; letter-spacing: 0.04em; flex: none; }}
-  .sess-purpose {{ font-size: 0.8rem; color: #64748b; font-style: italic;
-          margin-top: 8px; padding-top: 8px; border-top: 1px solid #f1f5f9; }}
-  .sess-why {{ font-size: 0.84rem; color: #334155; margin-top: 8px; padding: 8px 10px;
-          background: #f8fafc; border-left: 3px solid #cbd5e1; border-radius: 0; }}
-  .why-label {{ display: block; font-size: 0.68rem; font-weight: 600; color: #64748b;
-          text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }}
-  .methodology {{ font-size: 0.88rem; color: #334155; line-height: 1.6; margin: 0 4px 14px; }}
-  .src-list {{ display: flex; flex-direction: column; gap: 6px; }}
-  .src {{ display: flex; align-items: center; gap: 10px; padding: 8px 10px;
-          border: 1px solid #e2e8f0; border-radius: 8px; }}
-  .src-main {{ flex: 1; min-width: 0; }}
-  .src-claim {{ font-size: 0.86rem; color: #334155; }}
-  .src-cite {{ font-size: 0.76rem; color: #2563eb; text-decoration: none; }}
-  .src-cite:hover {{ text-decoration: underline; }}
-  .tier {{ font-size: 0.68rem; font-weight: 600; border-radius: 6px; padding: 2px 8px;
-          text-transform: capitalize; white-space: nowrap; }}
-  .src-note {{ font-size: 0.76rem; color: #94a3b8; margin: 12px 4px 2px; line-height: 1.5; }}
-  .focus {{ font-size: 0.7rem; background: #eef2ff; color: #4338ca; border-radius: 6px;
-          padding: 1px 6px; margin-left: 6px; }}
-  .rationale {{ font-size: 0.86rem; color: #334155; margin: 14px 4px 4px; }}
-  .zone-note {{ font-size: 0.78rem; color: #94a3b8; margin: 10px 4px 2px; }}
-  footer {{ color: #94a3b8; font-size: 0.8rem; margin-top: 28px; }}
-  /* tabs */
-  .tabs {{ display: flex; gap: 4px; border-bottom: 1px solid #e2e8f0; margin-bottom: 20px; }}
-  .tab-btn {{ background: none; border: none; padding: 10px 16px; font-size: 0.95rem;
-          color: #64748b; cursor: pointer; border-bottom: 2px solid transparent; }}
-  .tab-btn:hover {{ color: #0f172a; }}
-  .tab-btn.active {{ color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }}
-  .tab-panel {{ display: none; }}
-  .tab-panel.active {{ display: block; }}
-  /* zone table */
-  table.zones {{ width: 100%; border-collapse: collapse; font-size: 0.92rem; }}
-  table.zones th, table.zones td {{ text-align: center; padding: 8px 10px;
-          border-bottom: 1px solid #e2e8f0; }}
-  table.zones th:first-child, table.zones td:first-child {{ text-align: left; }}
-  table.zones th {{ color: #64748b; font-weight: 600; }}
-  .note {{ color: #475569; font-size: 0.88rem; line-height: 1.5; }}
-  .stale {{ background: #fef2f2; border: 1px solid #fecaca; border-left: 4px solid #dc2626;
-            color: #7f1d1d; padding: 12px 14px; border-radius: 8px; margin: 12px 0 4px;
-            font-size: 0.9rem; line-height: 1.5; }}
-</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="{theme.GOOGLE_FONTS_HREF}" crossorigin>
+<style>{styles.stylesheet()}</style>
 </head>
-<body>
+<body class="intro">
 <div class="wrap">
-  <h1>Hyrox Training</h1>
-  <div class="as-of">As of {as_of}</div>
+  <header class="masthead">
+    <h1>Hyrox Training</h1>
+    <div class="as-of">As of {as_of}</div>
+  </header>
   {stale_html}
 
   <div class="tabs">
@@ -843,30 +813,6 @@ def render_html(
   <footer>Generated {generated} · Garmin training load + HRV · TSB bands follow
   TrainingPeaks conventions. CTL warm-up window shaded; treat early TSB with caution.</footer>
 </div>
-<script>
-  document.querySelectorAll('.tab-btn').forEach(function (btn) {{
-    btn.addEventListener('click', function () {{
-      document.querySelectorAll('.tab-btn').forEach(function (b) {{ b.classList.remove('active'); }});
-      document.querySelectorAll('.tab-panel').forEach(function (p) {{ p.classList.remove('active'); }});
-      btn.classList.add('active');
-      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-      window.dispatchEvent(new Event('resize'));  // let Plotly size the hidden chart
-    }});
-  }});
-  document.querySelectorAll('.wk-pill').forEach(function (pill) {{
-    pill.addEventListener('click', function () {{
-      document.querySelectorAll('.wk-pill').forEach(function (p) {{ p.classList.remove('active'); }});
-      document.querySelectorAll('.wk-body').forEach(function (b) {{ b.classList.remove('active'); }});
-      pill.classList.add('active');
-      document.getElementById('wk-' + pill.dataset.week).classList.add('active');
-    }});
-  }});
-  document.querySelectorAll('.sess-row').forEach(function (row) {{
-    row.addEventListener('click', function () {{
-      row.classList.toggle('open');
-      document.getElementById('psess' + row.dataset.sess).classList.toggle('open');
-    }});
-  }});
-</script>
+<script>{_page_script()}</script>
 </body>
 </html>"""

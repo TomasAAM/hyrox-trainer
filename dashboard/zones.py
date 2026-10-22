@@ -13,6 +13,8 @@ from html import escape
 import pandas as pd
 import plotly.graph_objects as go
 
+from dashboard import theme
+
 # Common bpm axis for the band chart.
 _AXIS_MIN = 90
 _AXIS_MAX = 200
@@ -51,7 +53,7 @@ def build_zone_figure(zones: pd.DataFrame) -> go.Figure:
     """
     fig = go.Figure()
     if zones.empty:
-        fig.update_layout(height=200, template="plotly_white")
+        fig.update_layout(**theme.chart_layout(height=200))
         return fig
 
     ordered = zones.sort_values("zone_index")
@@ -68,7 +70,7 @@ def build_zone_figure(zones: pd.DataFrame) -> go.Figure:
                 x=[width],
                 base=lo_draw,
                 orientation="h",
-                marker=dict(color=_ZONE_COLORS[zi % 5], line=dict(color="white", width=1.5)),
+                marker=dict(color=_ZONE_COLORS[zi % 5], line=dict(color=theme.LIGHT.chart["surface"], width=1.5)),
                 text=f"{label}<br>{_bound_text(lo, hi)}" if width >= 10 else "",
                 textposition="inside",
                 insidetextanchor="middle",
@@ -79,12 +81,13 @@ def build_zone_figure(zones: pd.DataFrame) -> go.Figure:
         )
 
     fig.update_layout(
-        barmode="overlay",
-        height=200,
-        template="plotly_white",
-        margin=dict(l=30, r=30, t=20, b=40),
-        xaxis=dict(title="Heart rate (bpm)", range=[_AXIS_MIN, _AXIS_MAX]),
-        yaxis=dict(showticklabels=False),
+        **theme.chart_layout(
+            barmode="overlay",
+            height=200,
+            margin=dict(l=30, r=30, t=20, b=40),
+            xaxis=dict(title="Heart rate (bpm)", range=[_AXIS_MIN, _AXIS_MAX]),
+            yaxis=dict(showticklabels=False),
+        )
     )
     return fig
 
