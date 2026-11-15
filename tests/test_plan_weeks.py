@@ -17,7 +17,7 @@ from dashboard import render
 from plan import context
 from plan.config import DEFAULT_CONFIG
 
-_SEP_RACE = replace(DEFAULT_CONFIG, race_date=date(2026, 9, 5))
+_SEP_RACE = replace(DEFAULT_CONFIG, race_date=date(2026, 9, 5), races=())
 
 
 def test_weeks_until_race_covers_block_to_race_week() -> None:

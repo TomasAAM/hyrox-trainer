@@ -37,6 +37,7 @@ from plan.config import (
     HYROX_STATIONS,
     STRENGTH_LIBRARY,
     PlanConfig,
+    Race,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ def weeks_until_race(cfg: PlanConfig, today: date | None = None) -> list[date]:
     -------
     list of datetime.date
         Mondays from :func:`plan.phase.upcoming_monday` up to and including the
-        Monday of the race week. Empty when the race has already passed.
+        Monday of the final race's week. Empty when that race has already passed.
 
     Examples
     --------
@@ -131,11 +132,12 @@ def weeks_until_race(cfg: PlanConfig, today: date | None = None) -> list[date]:
     """
     reference = today or date.today()
     first = phase.upcoming_monday(reference)
-    if cfg.race_date < first:
+    last = cfg.last_race_date
+    if last < first:
         return []
     weeks: list[date] = []
     week = first
-    while week <= cfg.race_date:
+    while week <= last:
         weeks.append(week)
         week += timedelta(days=7)
     return weeks
@@ -165,6 +167,11 @@ class ContextBundle:
         Her scheduled runs for the plan week (date + title), from Garmin.
     running_days : list of str
         Weekday names she is expected to run (derived from ``runs`` or config).
+    race : Race or None
+        The race this week targets, from the calendar; ``None`` for a config
+        without a calendar.
+    previous_race : Race or None
+        The last race before this week, from the calendar.
     """
 
     cfg: PlanConfig
@@ -176,6 +183,8 @@ class ContextBundle:
     zones: pd.DataFrame
     runs: list[dict[str, Any]]
     running_days: list[str]
+    race: Race | None = None
+    previous_race: Race | None = None
 
 
 def _recent_summary(
@@ -279,9 +288,16 @@ def gather(cfg: PlanConfig = DEFAULT_CONFIG, week_start: date | None = None) -> 
     snapshot = metrics.latest_snapshot(load_series, hrv_series)
 
     week_start = week_start or phase.upcoming_monday(date.today())
-    phase_name, weeks_remaining = phase.phase_for_week(
-        week_start, cfg.race_date, cfg.taper_weeks
-    )
+    race: Race | None = None
+    previous_race: Race | None = None
+    if cfg.races:
+        calendar_week = phase.calendar_phase(week_start, cfg.races, cfg.previous_race)
+        phase_name, weeks_remaining = calendar_week.phase, calendar_week.weeks_remaining
+        race, previous_race = calendar_week.target, calendar_week.previous
+    else:
+        phase_name, weeks_remaining = phase.phase_for_week(
+            week_start, cfg.race_date, cfg.taper_weeks
+        )
     load_band = phase.load_target_band(snapshot.ctl * 7.0, phase_name)
     summary = _recent_summary(activities, load_series, snapshot, readiness, cfg.recent_window_days)
 
@@ -306,6 +322,8 @@ def gather(cfg: PlanConfig = DEFAULT_CONFIG, week_start: date | None = None) -> 
         zones=zones,
         runs=runs,
         running_days=running_days,
+        race=race,
+        previous_race=previous_race,
     )
 
 
@@ -334,6 +352,57 @@ def _format_runs(runs: list[dict[str, Any]], running_days: list[str]) -> str:
     return (
         "  (no scheduled runs found in Garmin — assume she may run on any day; keep at "
         "least one genuinely easy/buffer day and avoid stacking two hard days back-to-back)"
+    )
+
+
+_WEEK_TYPE_GUIDANCE: dict[str, str] = {
+    "build": (
+        "BUILD week between races: the heaviest loading of the block. Hard Hyrox days "
+        "stay off her Mon/Wed runs and at least 48 h before the next race. If she raced "
+        "in the last two days, keep those days easy (upper body, mobility) and load fully "
+        "from day three: there is no dedicated recovery week."
+    ),
+    "race": (
+        "RACE week for a B or C race, trained through: put the hardest session early in "
+        "the week (at least 72 h before the race), keep one short race-pace primer two "
+        "days out, and rest the day before. Do not cut the week's volume by more than "
+        "about 25%."
+    ),
+    "taper": (
+        "A-RACE week: cut volume by about 40%, keep station intensity at race load early in "
+        "the week, no new movements, nothing hard in the last 48 h, and a full rest day "
+        "before the race."
+    ),
+}
+
+
+def _race_line(race: Race) -> str:
+    """One calendar line: day, name, priority, category and venue."""
+    return (
+        f"{race.day.strftime('%a %d %b')} - {race.name} ({race.priority} race, {race.kind}) "
+        f"| {race.category} | {race.venue}"
+    )
+
+
+def _calendar_block(bundle: ContextBundle) -> str:
+    """Render the race calendar and what this week is for, or '' without a calendar."""
+    cfg = bundle.cfg
+    if not cfg.races or bundle.race is None:
+        return ""
+    lines = [_race_line(r) for r in cfg.races]
+    previous = (
+        f"  Previous race: {_race_line(bundle.previous_race)}\n"
+        if bundle.previous_race
+        else ""
+    )
+    guidance = _WEEK_TYPE_GUIDANCE.get(bundle.phase_name, "")
+    return (
+        "RACE CALENDAR (all entered as Singles Pro):\n"
+        + "\n".join(f"  {line}" for line in lines)
+        + f"\n  THIS WEEK TARGETS: {_race_line(bundle.race)}\n{previous}"
+        + (f"  WEEK TYPE: {guidance}\n" if guidance else "")
+        + "  Pure run races are covered by her own running plan; do not prescribe the race "
+        "itself, only the Hyrox work around it.\n"
     )
 
 
@@ -392,9 +461,22 @@ def render_brief(bundle: ContextBundle) -> str:
         ],
     }
 
+    entry = (
+        "She has entered SINGLES PRO"
+        if cfg.races
+        else "She competes DOUBLES but trains to be ready for WOMEN'S PRO"
+    )
+    race = bundle.race
+    target_line = (
+        f"TARGET: {race.name} on {race.day.isoformat()} | division trained: {HYROX_DIVISION}"
+        if race
+        else f"TARGET: {cfg.target_race.upper()} on {cfg.race_date.isoformat()} | "
+        f"division trained: {HYROX_DIVISION}"
+    )
+
     return f"""You are an expert HYROX strength & conditioning coach. Write one focused training \
-week for a female athlete training toward HYROX. She competes DOUBLES but trains to be ready for \
-WOMEN'S PRO, so prescribe station work at the Women's Pro standards below. \
+week for a female athlete training toward HYROX. {entry}, so prescribe station work at the \
+Women's Pro standards below. \
 CRITICAL: she follows her OWN separate running plan — do NOT prescribe standalone runs. Your job \
 is the Hyrox-specific work: strength, station/functional conditioning, and race simulations. \
 Express intensity with HEART-RATE ZONES (below) and RPE — never running pace. Auto-regulate: when \
@@ -402,9 +484,9 @@ recovery is poor (low readiness, strongly negative TSB/form, rising load), cut i
 volume rather than pushing on. Her runs already show up in the recent-load data below, so respect \
 total stress.
 
-TARGET: {cfg.target_race.upper()} on {cfg.race_date.isoformat()} | division trained: {HYROX_DIVISION}
+{target_line}
 WEEK TO PLAN: Monday {bundle.week_start.isoformat()}
-
+{_calendar_block(bundle)}
 PERIODIZATION (deterministic — do not override):
   Phase: {bundle.phase_name}   Weeks to race: {bundle.weeks_remaining}
   Weekly training-load target band: {int(bundle.load_band[0])}-{int(bundle.load_band[1])} (Garmin units, TOTAL incl. her runs)

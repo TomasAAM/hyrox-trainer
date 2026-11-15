@@ -95,11 +95,14 @@ def persist(
         load_band = (None, None)
         input_summary = {"recovery_data": "not connected: planned without load or recovery data"}
 
+    # With a race calendar each week records the race it targets, so the dashboard
+    # can label it; without one the week targets the single configured race.
+    race = bundle.race
     supabase.table("training_plan_weeks").upsert(
         {
             "week_start": bundle.week_start.isoformat(),
-            "target_race": cfg.target_race,
-            "race_date": cfg.race_date.isoformat(),
+            "target_race": race.name if race else cfg.target_race,
+            "race_date": (race.day if race else cfg.race_date).isoformat(),
             "phase": bundle.phase_name,
             "weeks_to_race": bundle.weeks_remaining,
             "load_target_low": load_band[0],
@@ -123,10 +126,12 @@ def persist(
 
 
 def persist_all(cfg: PlanConfig = DEFAULT_CONFIG) -> int:
-    """Persist every dated ``plan_week_*.json`` in the data directory.
+    """Persist every dated ``plan_week_*.json`` that belongs to the current block.
 
     Weeks are stored oldest first so the plan block reads consistently if the run
-    is interrupted part-way.
+    is interrupted part-way. With a race calendar, files for weeks outside it (the
+    earlier races' weeks) are skipped: re-persisting them would overwrite their
+    stored race with one from this calendar.
 
     Parameters
     ----------
@@ -139,6 +144,13 @@ def persist_all(cfg: PlanConfig = DEFAULT_CONFIG) -> int:
         Total number of planned sessions written across all weeks.
     """
     paths = sorted(context.PLAN_DIR.glob(context.PLAN_FILE_GLOB))
+    if cfg.races:
+        paths = [
+            p
+            for p in paths
+            if (week := context.week_start_from_path(p)) is not None
+            and cfg.block_start <= week <= cfg.last_race_date
+        ]
     if not paths:
         raise FileNotFoundError(
             f"No {context.PLAN_FILE_GLOB} files in {context.PLAN_DIR}; nothing to persist."

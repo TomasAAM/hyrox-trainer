@@ -14,12 +14,19 @@ Phase map (by whole weeks remaining until the race):
 
 The default above assumes a two-week taper. ``taper_weeks`` shortens it: with
 ``taper_weeks=0`` the race week is the peak and there is no taper week at all.
+
+A block with several races uses :func:`calendar_phase` instead, which adds a
+``race`` week (a B or C race trained through). There is no automatic recovery week:
+loading resumes straight after a race.
 """
 
 from __future__ import annotations
 
 import math
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, timedelta
+
+from plan.config import Race
 
 # Weekly-load multipliers applied to the chronic (CTL-derived) weekly load to set
 # the target band for each phase. Taper deliberately drops volume.
@@ -27,6 +34,7 @@ _PHASE_LOAD_MULT: dict[str, float] = {
     "base": 1.00,
     "build": 1.10,
     "peak": 1.00,
+    "race": 0.90,
     "taper": 0.55,
     "off": 0.30,
 }
@@ -118,6 +126,87 @@ def phase_for_week(
     """
     remaining = weeks_to_race(week_start, race_date)
     return classify_phase(remaining, taper_weeks), remaining
+
+
+@dataclass(frozen=True)
+class CalendarWeek:
+    """Phase of one plan week within a multi-race calendar.
+
+    Parameters
+    ----------
+    phase : str
+        One of ``base``, ``build``, ``race``, ``taper``, ``off``.
+    weeks_remaining : int
+        Whole weeks from the week's Monday to ``target`` (0 when there is none).
+    target : Race or None
+        The first race on or after the week's Monday; ``None`` once the calendar
+        is over.
+    previous : Race or None
+        The last race before the week's Monday.
+    """
+
+    phase: str
+    weeks_remaining: int
+    target: Race | None
+    previous: Race | None
+
+
+def calendar_phase(
+    week_start: date, races: tuple[Race, ...], previous_race: Race | None = None
+) -> CalendarWeek:
+    """Classify a plan week against a calendar of several races.
+
+    A week is classified by the first of these that applies:
+
+    1. ``taper`` -- the week holds an A race.
+    2. ``race`` -- the week holds a B or C race (trained through).
+    3. ``build`` -- otherwise, when the next A race is at most 8 weeks away
+       (or there is no A race left); ``base`` when it is further out.
+    4. ``off`` -- no race is left on the calendar.
+
+    There is no recovery week: the week after a race is ``build`` or ``race`` like
+    any other, and the plan itself keeps the first days after the race easy.
+
+    Parameters
+    ----------
+    week_start : datetime.date
+        Monday of the plan week.
+    races : tuple of Race
+        The calendar, in date order.
+    previous_race : Race, optional
+        The race before the calendar starts, used when no calendar race precedes
+        the week.
+
+    Returns
+    -------
+    CalendarWeek
+        The phase together with the race the week targets.
+
+    Examples
+    --------
+    >>> from plan.config import Race
+    >>> a = Race("A", date(2026, 12, 13), "A", "hybrid", "Pro", "Vina")
+    >>> calendar_phase(date(2026, 12, 7), (a,)).phase
+    'taper'
+    >>> calendar_phase(date(2026, 12, 14), (a,)).phase
+    'off'
+    """
+    before = [r for r in races if r.day < week_start]
+    previous = before[-1] if before else previous_race
+    upcoming = [r for r in races if r.day >= week_start]
+    if not upcoming:
+        return CalendarWeek("off", 0, None, previous)
+
+    target = upcoming[0]
+    remaining = weeks_to_race(week_start, target.day)
+
+    if target.day <= week_start + timedelta(days=6):
+        phase_name = "taper" if target.priority == "A" else "race"
+        return CalendarWeek(phase_name, remaining, target, previous)
+
+    next_a = next((r for r in upcoming if r.priority == "A"), target)
+    phase_name = "build" if weeks_to_race(week_start, next_a.day) <= 8 else "base"
+    return CalendarWeek(phase_name, remaining, target, previous)
 
 
 def load_target_band(weekly_chronic_load: float, phase: str) -> tuple[float, float]:

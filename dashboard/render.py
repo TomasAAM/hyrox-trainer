@@ -19,7 +19,6 @@ from plotly.subplots import make_subplots
 from dashboard import styles, theme
 from dashboard import zones as zones_mod
 from dashboard.metrics import CTL_WARMUP_DAYS, ReadinessSnapshot
-from plan import phase as plan_phase
 
 _COLOR_CTL = theme.COLOR_CTL     # blue   - fitness
 _COLOR_ATL = theme.COLOR_ATL     # orange - fatigue
@@ -31,7 +30,7 @@ _COLOR_BAND = theme.COLOR_BAND   # HRV baseline band fill
 # Periodization strip colours: saturated data marks, identical in both schemes.
 _PHASE_COLOR = {
     "base": "#0ea5e9", "build": "#2563eb", "peak": "#f97316",
-    "taper": "#16a34a", "off": "#94a3b8",
+    "race": "#e11d48", "taper": "#16a34a", "off": "#94a3b8",
 }
 # Status and intensity are tinted surfaces rather than saturated marks, so they
 # carry a CSS class instead of an inline colour: an inline style cannot answer
@@ -200,16 +199,12 @@ class PlanView:
     selected_week : str or None
         ISO ``week_start`` shown on load; defaults to the week containing today,
         falling back to the last week before today, then the first week.
-    taper_weeks : int
-        Whole weeks of taper, so the periodization strip labels weeks the same
-        way the plan was generated.
     """
 
     weeks: list[dict]
     sessions_by_week: dict[str, pd.DataFrame]
     zones: pd.DataFrame
     selected_week: str | None = None
-    taper_weeks: int = 2
 
     @property
     def week(self) -> dict | None:
@@ -499,34 +494,38 @@ def _weekly_table(weekly: pd.DataFrame) -> str:
     return f"<table class='weekly'>{header}{body}</table>"
 
 
-def _phase_strip(
-    race_date: date,
-    current_week_start: date,
-    start_week: date | None = None,
-    taper_weeks: int = 2,
-) -> str:
-    """Render a colored week-by-week periodization strip up to the race.
+def _race_in_week(week: dict) -> bool:
+    """Whether the week's target race falls inside the week itself."""
+    week_start = date.fromisoformat(week["week_start"])
+    return week_start <= date.fromisoformat(week["race_date"]) <= week_start + timedelta(days=6)
 
-    The strip always spans the whole remaining block (from ``start_week``), while
-    ``current_week_start`` is the cell drawn with the selection ring — so the
-    strip stays stable as the reader switches weeks.
+
+def _phase_strip(weeks: list[dict], current_week_start: date) -> str:
+    """Render a colored week-by-week periodization strip across the whole block.
+
+    Each cell uses the phase stored with its week, so the strip always matches how
+    the plan was generated. ``current_week_start`` is the cell drawn with the
+    selection ring — the strip stays stable as the reader switches weeks. A week
+    that holds a race names it under the phase.
     """
     cells = []
-    week = start_week or current_week_start
-    guard = 0
-    while week <= race_date and guard < 60:
-        phase_name, _ = plan_phase.phase_for_week(week, race_date, taper_weeks)
+    for week in weeks:
+        week_start = date.fromisoformat(week["week_start"])
+        phase_name = week["phase"]
         color = _PHASE_COLOR.get(phase_name, "#94a3b8")
-        selected = week == current_week_start
+        selected = week_start == current_week_start
+        race_html = (
+            f'<div class="phase-sub">{escape(str(week["target_race"]))}</div>'
+            if _race_in_week(week)
+            else ""
+        )
         cells.append(
             f'<button type="button" class="phase-cell{" selected" if selected else ""}" '
-            f'data-week="{week.isoformat()}" aria-pressed="{"true" if selected else "false"}">'
+            f'data-week="{week_start.isoformat()}" aria-pressed="{"true" if selected else "false"}">'
             f'<div class="phase-dot" style="background:{color}"></div>'
-            f'<div class="phase-wk">{week.strftime("%d %b")}</div>'
-            f'<div class="phase-name">{phase_name}</div></button>'
+            f'<div class="phase-wk">{week_start.strftime("%d %b")}</div>'
+            f'<div class="phase-name">{escape(phase_name)}</div>{race_html}</button>'
         )
-        week += timedelta(days=7)
-        guard += 1
     return f'<div class="phase-strip">{"".join(cells)}</div>'
 
 
@@ -629,13 +628,12 @@ def _plan_list(sessions: pd.DataFrame, key: str = "") -> str:
     return f"<div class='sess-list'>{''.join(items)}</div>"
 
 
-def _week_pills(weeks: list[dict], selected: str, race_date: date) -> str:
+def _week_pills(weeks: list[dict], selected: str) -> str:
     """Render the week selector as a row of pills, one per generated week."""
     pills = []
     for i, week in enumerate(weeks, start=1):
         week_start = date.fromisoformat(week["week_start"])
-        is_race_week = week_start <= race_date <= week_start + timedelta(days=6)
-        label = "Race week" if is_race_week else f"Week {i}"
+        label = "Race week" if _race_in_week(week) else f"Week {i}"
         active = " active" if week["week_start"] == selected else ""
         color = _PHASE_COLOR.get(week["phase"], "#94a3b8")
         pills.append(
@@ -659,7 +657,6 @@ def _week_body(plan: PlanView, week: dict, selected: str) -> str:
     """Render one week's cards, phase strip, sessions and coach's note."""
     race_date = date.fromisoformat(week["race_date"])
     week_start = date.fromisoformat(week["week_start"])
-    block_start = date.fromisoformat(plan.weeks[0]["week_start"])
     days_to = (race_date - date.today()).days
     sessions = plan.sessions_by_week.get(week["week_start"], pd.DataFrame())
 
@@ -685,7 +682,7 @@ def _week_body(plan: PlanView, week: dict, selected: str) -> str:
     <div class="cards">{card_html}</div>
     <div class="panel">
       <div class="section-label">Periodization</div>
-      {_phase_strip(race_date, week_start, start_week=block_start, taper_weeks=plan.taper_weeks)}
+      {_phase_strip(plan.weeks, week_start)}
     </div>
     <div class="panel">
       <div class="section-label">Week of {week_start.strftime('%d %b %Y')}</div>
@@ -710,7 +707,6 @@ def _plan_section(plan: PlanView, show_zones: bool = True) -> str:
         )
 
     selected = plan.selected_week or plan.weeks[0]["week_start"]
-    race_date = date.fromisoformat(plan.weeks[0]["race_date"])
 
     # The methodology note is week-level but near-identical across a block; show
     # the selected week's so it stays in step with what is being read.
@@ -739,7 +735,7 @@ def _plan_section(plan: PlanView, show_zones: bool = True) -> str:
     )
 
     return f"""<h2>Training plan</h2>
-  {_week_pills(plan.weeks, selected, race_date)}
+  {_week_pills(plan.weeks, selected)}
   {bodies}
   <div class="panel">
     <div class="section-label">Methodology &amp; sources</div>

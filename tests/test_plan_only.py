@@ -105,6 +105,7 @@ def _run_persist(monkeypatch, tmp_path: Path, connected: bool) -> dict:
         weeks_remaining=3,
         load_band=(685.0, 838.0),
         summary={"ctl_fitness": 108.8},
+        race=None,
     )
     store: dict = {}
     monkeypatch.setattr(persist.context, "gather", lambda *_a, **_k: bundle)

@@ -57,7 +57,14 @@ CLI), in order: `0001_initial_schema.sql`, `0002_training_plan.sql`, then
 
 Edit `plan/config.py` → `DEFAULT_CONFIG`:
 
-- `race_date` — her real race date (currently a placeholder).
+- `race_date` — the A race the block is built around.
+- `races` / `previous_race` — the race calendar for a block with several races
+  (`RACE_CALENDAR`, each a `Race` with a priority). When `races` is set, each week's
+  phase and target race come from the calendar instead of `race_date`/`taper_weeks`:
+  an A-race week is `taper`, a B or C race week is `race` (trained through, no
+  taper), and the weeks between are `build`. There is no automatic recovery week.
+  `previous_race` tells the brief how recently she raced. Each stored week records
+  the race it targets in `target_race` / `race_date`.
 - `sessions_per_week` / `strength_per_week` — her weekly Hyrox availability.
 - `ATHLETE_LOADS` — her known station capacities.
 - `taper_weeks` — whole weeks of taper before the race (default 2). `0` means no
@@ -99,7 +106,10 @@ python -m plan.persist data/plan_week_2026-08-24.json
 ```
 
 The dashboard's Training plan tab shows a week selector across every stored week
-for the current `race_date`, so the whole block is browsable from one page.
+for a race on the calendar, so the whole block is browsable from one page. With a
+race calendar, `--all` covers every week through the last race, and
+`plan.persist --all` stores only the `plan_week_*.json` files inside that block, so
+the files of an earlier race are never re-stored against the new calendar.
 
 > A week planned far in advance is built on **today's** recovery snapshot — the
 > load band and any auto-regulation reflect the day it was generated, not the day
